@@ -44,6 +44,7 @@ void ascii_frame_commit( void )
 
 void ascii_frame_poll( void )
 {
+    if( frame_idx == 0 ) { idle_cnt = 0; return; }   /* 空帧不提交 */
     if( ++idle_cnt >= ( ASCII_IDLE_MS / 2 ) )        /* 500ms / 2ms 心跳 */
         ascii_frame_commit();
 }
