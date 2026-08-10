@@ -4,6 +4,7 @@ project/Listings/
 project/Objects/
 project/*.uvguix.*
 project/*.scvd
+project/*.uvoptx
 
 # IDE local config
 project/.vscode/
