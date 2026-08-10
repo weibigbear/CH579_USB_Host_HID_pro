@@ -56,7 +56,7 @@ const char *usage_name( UINT16 code )
         case 0xE2: return "LAlt";  case 0xE3: return "LGui";
         case 0xE4: return "RCtrl"; case 0xE5: return "RShift";
         case 0xE6: return "RAlt";  case 0xE7: return "RGui";
-        default:   return "?";
+        default:   return "";
     }
 }
 

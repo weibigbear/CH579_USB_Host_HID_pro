@@ -33,7 +33,7 @@ static void process_key_events( void )
             if( ev.type == KEV_PRESS )
             {
                 UINT8  sh = ( ( ev.mods >> 1 ) | ( ev.mods >> 5 ) ) & 1;
-                if( ev.usage == 0x28 )                      /* Enter: 立即提交 */
+                if( ev.usage == 0x28 || ev.usage == 0x58 )  /* Enter/小键盘Enter: 立即提交 */
                     ascii_frame_commit();
                 else if( ev.usage == 0x2A )                 /* Backspace: 删字 */
                     ascii_frame_backspace();
