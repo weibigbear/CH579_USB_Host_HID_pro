@@ -359,6 +359,48 @@ static void up_puthex4( UINT16 v )
     up_puts( &tmp[i] );
 }
 
+static UINT8 caps_lock = 0;      /* CapsLock 状态跟踪(按下切换) */
+static char  key_chr[ 2 ] = "?"; /* 单字符显示缓冲 */
+
+/*******************************************************************************
+* 按键显示: 字母随 shift^caps 大小写, 数字区/标点随 Shift 出符号
+*******************************************************************************/
+static const char *key_display( UINT16 usage, UINT8 shift )
+{
+    if( usage >= 0x04 && usage <= 0x1D )                    /* A-Z */
+    {
+        UINT8 up = ( shift != 0 ) ^ ( caps_lock != 0 );
+        key_chr[ 0 ] = up ? ( char )( 'A' + ( usage - 0x04 ) )
+                          : ( char )( 'a' + ( usage - 0x04 ) );
+        return key_chr;
+    }
+    switch( usage )
+    {
+        case 0x1E: return shift ? "!" : "1";
+        case 0x1F: return shift ? "@" : "2";
+        case 0x20: return shift ? "#" : "3";
+        case 0x21: return shift ? "$" : "4";
+        case 0x22: return shift ? "%" : "5";
+        case 0x23: return shift ? "^" : "6";
+        case 0x24: return shift ? "&" : "7";
+        case 0x25: return shift ? "*" : "8";
+        case 0x26: return shift ? "(" : "9";
+        case 0x27: return shift ? ")" : "0";
+        case 0x2D: return shift ? "_" : "-";
+        case 0x2E: return shift ? "+" : "=";
+        case 0x2F: return shift ? "{" : "[";
+        case 0x30: return shift ? "}" : "]";
+        case 0x31: return shift ? "|" : "\\";
+        case 0x33: return shift ? ":" : ";";
+        case 0x34: return shift ? "\"" : "'";
+        case 0x35: return shift ? "~" : "`";
+        case 0x36: return shift ? "<" : ",";
+        case 0x37: return shift ? ">" : ".";
+        case 0x38: return shift ? "?" : "/";
+        default:   return usage_name( usage );
+    }
+}
+
 /*******************************************************************************
 * 消费: 弹空队列 → UART 打印
 *******************************************************************************/
@@ -378,10 +420,12 @@ static void process_key_events( void )
         }
         else
         {
+            if( ev.type == KEV_PRESS && ev.usage == 0x39 )
+                caps_lock ^= 1;                             /* CapsLock 按下切换 */
             up_puts( "KEY:  [0] " );
             up_puts( ev.type == KEV_PRESS ? "DN " : "UP " );
             up_puts( "\"" );
-            up_puts( usage_name( ev.usage ) );
+            up_puts( key_display( ev.usage, ev.mods & 0x01 ) );
             up_puts( "\" (mods=" );
             up_puthex( ev.mods );
             up_puts( ")\r\n" );
