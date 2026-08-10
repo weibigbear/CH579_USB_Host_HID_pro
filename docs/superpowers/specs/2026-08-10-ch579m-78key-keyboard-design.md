@@ -109,3 +109,61 @@
 
 - 速度修复无效 → 备选：强制全速测试 / `RB_UH_PRE_PID_EN` / 换 USB 线
 - 按键掉线残留 → VBUS 供电问题，硬件侧处理
+
+## 实施结果（2026-08-10）
+
+### 根因确认（硬件实测）
+
+诊断日志实锤：
+```
+spd=00000000 UC_LS=00000000 UH_LS=00000001
+```
+- `DeviceSpeed=0`（低速），`R8_USB_CTRL.RB_UC_LOW_SPEED=0`（被库翻回全速），`R8_UHOST_CTRL.RB_UH_LOW_SPEED=1`（端口仍低速）——寄存器不一致
+- 一行 `SetUsbSpeed(ThisUsbDev.DeviceSpeed)` 验证后：`if0/if1` 从 `20 20 20` 变全 `0`，心跳从 `err=500` 变 `nak=500`，假设证实
+
+### 修复落地
+
+- `CH57x_usbhostClass.c`：6 处成功路径 `SetUsbSpeed(1)` → `SetUsbSpeed(ThisUsbDev.DeviceSpeed)`（U盘/打印机/键盘/鼠标/HUB/未知设备），失败清理路径（第 171 行）保留
+- 修复后：`spd=0 UC_LS=1 UH_LS=1`（一致），78 键键盘 + MK5 小键盘双回归通过
+
+### 接口 1 报告描述符取证（rep1）
+
+- 集合 1：**Consumer 页（05 0C）**，ReportID=1，usage 范围 0x0000-0x023C，1×16bit usage 数组 → 解析器按 `[ReportID][usage16 小端]` 处理
+- 集合 2：Generic Desktop System Control（05 01 09 80），ReportID=2，usage 0x81-0x83（Power/Sleep/Wake）3 bit 输入——未解码，保留 raw 打印策略
+- 键盘接口（rep0）：标准键盘报告（无 ReportID），8 字节（修饰键+保留+6 键码），含 LED 输出报告（未使用）
+
+### 多媒体键实测结果
+
+| usage | 名称 | 键位 |
+|---|---|---|
+| 0x00B6 | Prev | Fn 组合 |
+| 0x00CD | Play/Pause | Fn 组合 |
+| 0x00B5 | Next | Fn 组合 |
+| 0x00E2 | Mute | Fn 组合 |
+| 0x00EA | Vol- | Fn 组合 |
+| 0x00E9 | Vol+ | Fn 组合 |
+| 0x0183 | Fn+F3 | 实测键位（按物理键命名） |
+
+### 附加实现
+
+- 按键事件环形队列（16 深）+ 键盘/Consumer 状态差分解析 → PRESS/RELEASE 事件
+- 完整 HID usage 键位映射表（0x04-0x65 + 修饰键 0xE0-0xE7）
+- 实际字符显示：字母随 CapsLock/Shift 大小写，数字/标点随 Shift 出符号（Shift+1→`!` 等）
+- 串口命令：`p` 状态 / `d` 事件丢弃计数 / `e` 清空队列
+- 报告描述符 dump（rep0/rep1）
+
+### 验收结果
+
+| # | 验收项 | 结果 |
+|---|---|---|
+| 1 | 78 键键盘 `if0/if1` 全 0，心跳 nak 正常 err≈0 | ✅ |
+| 2 | 按键 → `KEY: [0] DN/UP "字符" (mods=XX)` | ✅ |
+| 3 | Fn 组合 → `MEDIA: [1] DN/UP 名称` | ✅ |
+| 4 | MK5 小键盘回归正常 | ✅ |
+| 5 | 修改仅限 main.c + usbhostClass.c，无新增文件 | ✅ |
+
+### 备注
+
+- 测试期间出现的 `USB dev out` 为用户手动拔插，非固件问题
+- 6 键防冲突溢出（0xFF）与断线重插时快照未清零会产生少量伪事件（自愈），记录为已知小问题
+- 接口 1 的 ReportID=2 系统控制键（Power/Sleep/Wake）未解码
