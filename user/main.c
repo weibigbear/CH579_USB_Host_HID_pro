@@ -307,6 +307,7 @@ static const char *consumer_usage_name( UINT16 u )
         case 0x00CD: return "Play/Pause";
         case 0x0223: return "Home";
         case 0x0224: return "Back";
+        case 0x0183: return "Fn+F3";   /* 该键盘实测键位 */
         default:     return 0;
     }
 }
