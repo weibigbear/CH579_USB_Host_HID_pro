@@ -16,7 +16,7 @@ __align(4) UINT8  TxBuffer[ MAX_PACKET_SIZE ];  // OUT, must even address
 typedef struct
 {
     UINT8   type;      /* KEV_PRESS / KEV_RELEASE */
-    UINT8   mods;      /* bit0 Shift bit1 Ctrl bit2 Alt bit3 GUI */
+    UINT8   mods;      /* 修饰键位: bit0 LCtrl bit1 LShift bit2 LAlt bit3 LGui bit4 RCtrl bit5 RShift bit6 RAlt bit7 RGui */
     UINT8   ifidx;     /* 0=键盘 1=多媒体 */
     UINT16  usage;     /* HID usage 码 */
 } key_event_t;
@@ -255,7 +255,23 @@ static UINT8 HID_GetReportDescr( UINT8 infc, UINT8 *retlen )
 /*******************************************************************************
 * 键盘报告解析: 与上次按下集合对比生成 按下/释放 事件
 * 报告格式: [0]=修饰键 [1]=保留 [2..7]=按键码
+* 修饰字节位: bit0 LCtrl bit1 LShift bit2 LAlt bit3 LGui
+*             bit4 RCtrl bit5 RShift bit6 RAlt bit7 RGui
 *******************************************************************************/
+static const UINT8 mod_usage[ 8 ] = { 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7 };
+
+/* 修饰键位变化 → 按下/释放事件 */
+static void emit_mod_events( UINT8 old_m, UINT8 new_m )
+{
+    UINT8 b;
+    for( b = 0; b < 8; b ++ )
+    {
+        UINT8 ob = ( old_m >> b ) & 1, nb = ( new_m >> b ) & 1;
+        if( ob != nb )
+            kbd_ev_push( nb ? KEV_PRESS : KEV_RELEASE, new_m, 0, mod_usage[ b ] );
+    }
+}
+
 static void parse_kbd_report( UINT8 *buf, UINT8 len )
 {
     static UINT8 last_keys[ 6 ];
@@ -263,7 +279,8 @@ static void parse_kbd_report( UINT8 *buf, UINT8 len )
     UINT8  i, j, mods, found;
 
     if( len < 3 ) return;
-    mods = buf[ 0 ] & 0x0F;
+    mods = buf[ 0 ];
+    emit_mod_events( last_mods, mods );
 
     /* 释放: 上次有而本次无 */
     for( i = 0; i < 6; i ++ )
@@ -426,7 +443,7 @@ static void process_key_events( void )
             up_puts( "KEY:  [0] " );
             up_puts( ev.type == KEV_PRESS ? "DN " : "UP " );
             up_puts( "\"" );
-            up_puts( key_display( ev.usage, ev.mods & 0x01 ) );
+            up_puts( key_display( ev.usage, ( ( ev.mods >> 1 ) | ( ev.mods >> 5 ) ) & 1 ) );
             up_puts( "\" (mods=" );
             up_puthex( ev.mods );
             up_puts( ")\r\n" );
