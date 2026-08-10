@@ -314,6 +314,17 @@ int main()
                 up_puts( " ep1=" );
                 up_printf( "%x\r\n", ThisUsbDev.GpVar[ 1 ] );
 
+                /* 诊断: 枚举后的速度状态(0=低速 1=全速) */
+                up_puts( "spd=" );
+                up_printf( "%x", ThisUsbDev.DeviceSpeed );
+                up_puts( " UC_LS=" );
+                up_printf( "%x", ( R8_USB_CTRL & RB_UC_LOW_SPEED ) ? 1 : 0 );
+                up_puts( " UH_LS=" );
+                up_printf( "%x\r\n", ( R8_UHOST_CTRL & RB_UH_LOW_SPEED ) ? 1 : 0 );
+
+                /* 验证假设(临时): 恢复设备实际速度, 库修复后移除 */
+                SetUsbSpeed( ThisUsbDev.DeviceSpeed );
+
                 kbd_ifnum = ( ThisUsbDev.GpVar[ 2 ] == 0xFF ) ? 0 : ThisUsbDev.GpVar[ 2 ];
 
                 /* 关键: 组合接收器必须两个 HID 接口都初始化(SetIdle/SetProto/读报告描述符)
