@@ -304,8 +304,8 @@ static const char *consumer_usage_name( UINT16 u )
 }
 
 /*******************************************************************************
-* Consumer 报告解析: 按 16 位 usage 数组解码 (与上次对比生成 按下/释放 事件)
-* 若 Task 3 实测抓到的报告描述符不是 16 位 usage 数组结构, 按实测调整
+* Consumer 报告解析: 接口1 报告带 ReportID(0x01), 格式 [ID][usage16 小端]
+* 与上次对比生成 按下/释放 事件; ReportID=2 的系统控制位不解析
 *******************************************************************************/
 static void parse_consumer_report( UINT8 *buf, UINT8 len )
 {
@@ -314,8 +314,9 @@ static void parse_consumer_report( UINT8 *buf, UINT8 len )
     UINT16 cur[ 4 ];
     UINT8  n = 0, i, j, found;
 
-    if( len < 2 ) return;
-    for( j = 0; j + 1 < len && n < 4; j += 2 )
+    if( len < 3 ) return;
+    if( buf[ 0 ] != 0x01 ) return;      /* 仅解析 Consumer 报告(ReportID=1) */
+    for( j = 1; j + 1 < len && n < 4; j += 2 )
     {
         UINT16 u = ( UINT16 )( buf[ j ] | ( buf[ j + 1 ] << 8 ) );
         if( u ) cur[ n ++ ] = u;
