@@ -4,6 +4,8 @@
 #include "uart_debug.h"
 #include "usb_host_hid.h"
 #include "keymap.h"
+#include "ascii_frame.h"
+#include "modbus_rtu.h"
 
 /*******************************************************************************
 * 消费: 弹空队列 → UART 打印
@@ -26,6 +28,26 @@ static void process_key_events( void )
         {
             if( ev.type == KEV_PRESS && ev.usage == 0x39 )
                 keymap_caps_toggle();                       /* CapsLock 按下切换 */
+
+            /* --- ASCII 帧写入 (Modbus 40001~40128) --- */
+            if( ev.type == KEV_PRESS )
+            {
+                UINT8  sh = ( ( ev.mods >> 1 ) | ( ev.mods >> 5 ) ) & 1;
+                if( ev.usage == 0x28 )                      /* Enter: 立即提交 */
+                    ascii_frame_commit();
+                else if( ev.usage == 0x2A )                 /* Backspace: 删字 */
+                    ascii_frame_backspace();
+                else
+                {
+                    const char *s = key_display( ev.usage, sh );
+                    if( ev.usage == 0x2C )                  /* Space: 写空格 */
+                        ascii_frame_putch( ' ' );
+                    else if( s[ 0 ] >= 0x20 && s[ 0 ] <= 0x7E && s[ 1 ] == 0 )
+                        ascii_frame_putch( s[ 0 ] );        /* 单字符可打印才写入 */
+                    /* 多字符名称(F1/Esc 等)与非 ASCII 键忽略 */
+                }
+            }
+
             up_puts( "KEY:  [0] " );
             up_puts( ev.type == KEV_PRESS ? "DN " : "UP " );
             up_puts( "\"" );
@@ -48,6 +70,9 @@ int main()
     GPIOA_ModeCfg( GPIO_Pin_9,  GPIO_ModeOut_PP_5mA );           /* TXD */
     UART1_DefInit();                                             /* 115200 */
 
+    ascii_frame_init();
+    modbus_rtu_init();
+
     up_puts( "\r\nMK5 USB-HID Host start\r\n" );
 
     usb_hid_init();
@@ -61,6 +86,9 @@ int main()
             usb_hid_poll_endpoints();
             process_key_events();
         }
+
+        ascii_frame_poll();
+        modbus_rtu_poll();
 
 /* 串口命令: 'p' 打印状态 'd' 打印丢弃计数 'e' 清空队列(其余字符忽略) */
         if( R8_UART1_LSR & RB_LSR_DATA_RDY )
