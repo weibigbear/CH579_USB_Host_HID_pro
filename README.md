@@ -14,11 +14,14 @@
   - 未识别 usage 原值打印（`MEDIA: 0xXXXX`）
 - **串口调试命令**：`p` 状态打印 / `d` 打印丢弃事件数 / `e` 清空事件队列
 - **诊断输出**：枚举速度、USB 寄存器状态、IN 轮询 NAK/错误统计
+- **Modbus RTU 从机**：键盘输入字符按顺序写入保持寄存器 40001~40128（低字节 ASCII、高字节 0），9600 8N1，仅响应功能码 0x03
 
 ## 硬件接线
 
 - MCU：CH579M，USB Host 口接 USB 键盘，UART1 115200 8N1 接调试串口
 - 输出仅通过 UART1 打印，无屏幕 / 无额外外设依赖
+- Modbus：UART3（TXD3=PA5 推挽、RXD3=PA4 上拉输入），PA6=RE/DE 方向控制（推挽，经 1k 电阻，RS485 收发器 5V 供电）
+- **无 RS485 收发器也能测试**：Modbus RTU 本质是普通 UART 协议，直接用 USB-TTL 模块连 PA4/PA5 即可，PA6 悬空不影响（见下文「TTL 直连测试」）
 
 ## 目录结构
 
@@ -33,6 +36,110 @@
 ├─ docs/                        # 设计与实现文档
 └─ README.md
 ```
+
+## Modbus RTU 从机（键盘 → 40001~40128 保持寄存器）
+
+键盘输入的字符按顺序写入保持寄存器 `40001~40128`（Modbus 内部地址 `0x0000~0x007F`）。每个寄存器 16 位：**低字节 = ASCII 码，高字节 = 0**；无字符的寄存器值为 0。
+
+**Modbus 参数**：从机地址 1、波特率 9600、8 数据位 / 无校验 / 1 停止位（8N1），仅支持功能码 `0x03` 读保持寄存器，单次读取数量 ≤125（超出需分段）。
+
+**帧写入规则：**
+
+| 键 | 行为 |
+| ---- | ---- |
+| 可打印字符（0x20~0x7E，含空格） | 追加到寄存器组当前位 |
+| Enter（主键盘 0x28 / 小键盘 0x58） | 立即提交帧（余段清零，写入位复位） |
+| Backspace | 回退一位并清零该寄存器 |
+| 暂停输入 500ms | 空闲超时自动提交（`ASCII_IDLE_MS` 可调） |
+| 其他键（F1、Esc、方向键等） | 忽略，不写入 |
+
+寄存器答应对齐：读 `40001` 起始的 `N` 个寄存器，返回顺序即输入顺序。
+
+### 错误处理
+
+- 非 0x03 功能码 → 异常码 `0x01`（非法功能）
+- 数量为 0、>125 或地址越界 → 异常码 `0x02`（非法数据地址）
+- 从机地址不匹配 / CRC 错误 → 不应答
+
+### TTL 直连测试（无需 RS485）
+
+Modbus RTU 是标准 UART 协议，**没有 RS485 收发器也能完整验证**。直接通过 USB-TTL 模块（如 CH340 / CP2102 / FT232）连接，PA6 方向控制引脚悬空即可（TTL 全双工，无需方向切换）。
+
+**接线：**
+
+| CH579M | USB-TTL 模块 |
+| ---- | ---- |
+| PA5 (TXD3) | RX |
+| PA4 (RXD3) | TX |
+| GND | GND |
+| PA6 | 悬空不接 |
+
+注意：CH579M 为 3.3V 系统，USB-TTL 模块请选 **3.3V 电平**（5V 模块可能损坏 PA4/PA5）。
+
+**测试方法一：Modbus Poll（推荐）**
+
+1. Modbus Poll 免费版功能受限，仅能读，本功能正好只需要读
+2. `Connection Setup` 选 **Modbus ASCII/TCP 之外**的串口类型（Modbus Poll 界面：`Connection → Connect`，Mode 选 **RTU**、串口选 USB-TTL 的 COM 口、9600、8N1）
+3. `Setup → Read/Write Definition`：Function=**03 (Read Holding Registers)**，Slave ID=**1**，Address=**0**（对应 40001），Quantity=**5**
+4. 按 `F8`（或菜单 Read Once）反复读取观察寄存器值
+
+**测试方法二：串口助手手动发包**
+
+帧格式：`从机地址(01) + 功能码(03) + 起始地址高/低 + 数量高/低 + CRC16低位 + CRC16高位`。
+
+读 40001 起 5 个寄存器（预算好 CRC 的完整帧）：
+
+```
+01 03 00 00 00 05 85 C9
+```
+
+明文：`01` 地址、`03` 功能码、`00 00` 起始地址（40001）、`00 05` 数量 5、`85 C9` = CRC16（=0xC985，低字节在前）。每次发送间停顿 >3.5 字符时间（9600 下约 4ms），串口助手建议开启 **HEX 发送**、间隔 ≥100ms。收到应答第一个字节应为 `01`（地址），第 2 字节 `03`，第 3 字节为 `0A`（5 寄存器 × 2 字节）。
+
+**测试方法三：pymodbus（Python 脚本）**
+
+```python
+from pymodbus.client import ModbusSerialClient
+
+c = ModbusSerialClient('rtu', port='COM5', baudrate=9600,
+                       bytesize=8, parity='N', stopbits=1, timeout=1)
+c.connect()
+r = c.read_holding_registers(0, 5, slave=1)   # 40001 起 5 个
+print([hex(x) for x in r.registers])          # 低字节为 ASCII
+c.close()
+```
+
+无 pymodbus 时可用 `pyserial` 手算 CRC：
+
+```python
+import serial
+
+def crc16(data):
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return crc
+
+s = serial.Serial('COM5', 9600, timeout=1)
+req = bytes.fromhex('01 03 00 00 00 05')          # 读 40001 起 5 个
+crc = crc16(req)
+s.write(req + bytes([crc & 0xFF, crc >> 8]))     # CRC 低字节在前
+resp = s.read(50)
+print(resp.hex(' '))                             # 期望: 01 03 0A 00 41 ...
+```
+
+**验证步骤：**
+
+1. 上电烧录，插上键盘，UART1（调试口）可看到 `KEY: DN "A"` 等事件
+2. 输入 `ABC` → 读 40001~40003 = `0x0041 / 0x0042 / 0x0043`，40004 起为 0
+3. 按 Enter → 帧立即提交，40001 重新从 0 开始
+4. 输入字符后停止 500ms → 空闲超时自动提交
+5. 按 Backspace → 上一个字符变为 0
+6. 分段读取验证：读 40001~40125（125 个）与 40126~40128（3 个），分别发包
+7. 错误注入：错 CRC/错地址 → 无响应；数量=0 或 >125 → 异常码 0x02；非 0x03 功能码 → 异常码 0x01
+
+测试通过后接 RS485 只需把 PA4/PA5/PA6 连到收发器（PA6 经 1k 电阻接 RE/DE，收发器 5V 供电），**代码无需改动**。
 
 ## 构建
 

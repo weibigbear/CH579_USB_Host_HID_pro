@@ -473,9 +473,27 @@ git commit -m "build: Keil 工程加入 modbus_rtu 与 ascii_frame 模块"
 
 **Files:** 无（用户执行硬件测试）
 
-- [ ] **Step 1: TTL 级协议验证（可选）**
+- [ ] **Step 1: TTL 级协议验证（推荐，无需 RS485）**
 
-UART3 的 PA4/PA5 用 USB-TTL 直连 PC（跳过 485 收发器），Modbus Poll 或串口助手发包验证协议正确性。注意此时无 PA6 方向切换问题（全双工 TTL）。
+Modbus RTU 是标准 UART 协议，没有 RS485 收发器也可完整验证。USB-TTL 模块（CH340/CP2102/FT232，**选 3.3V 电平**）直接连 PA4/PA5，PA6 悬空：
+
+| CH579M | USB-TTL |
+| ---- | ---- |
+| PA5 (TXD3) | RX |
+| PA4 (RXD3) | TX |
+| GND | GND |
+| PA6 | 悬空 |
+
+测试方法任选：
+- **Modbus Poll**：RTU 模式、USB-TTL COM 口、9600 8N1；Function=03、Slave ID=1、Address=0、Quantity 自行设置；`F8` 反复读
+- **串口助手 HEX 发包**：读 40001 起 5 个寄存器 → `01 03 00 00 00 05 85 C9`（CRC=0xC985，低字节在前，已用 Python 验证）；发送间隔 ≥100ms
+- **pymodbus**：`read_holding_registers(0, 5, slave=1)`；无 pymodbus 用 pyserial 手算 CRC（Poly 0xA001，低字节在前）
+
+逐项验证（键盘写入结果）：
+- 输入 `ABC` → 40001~40003 = 0x0041/0x0042/0x0043，其后为 0
+- Enter → 立即提交复位；停顿 500ms → 超时提交；Backspace → 前位清 0
+- 分段读：40001~40125 与 40126~40128
+- 错误注入：错 CRC/错地址 → 无响应；数量=0 或 >125、越界 → 异常码 0x02；非 0x03 → 异常码 0x01
 
 - [ ] **Step 2: RS485 联调**
 
