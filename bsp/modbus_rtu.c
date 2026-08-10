@@ -5,7 +5,6 @@
 * 帧边界: 3.5 字符空闲(9600 ≈ 3.65ms, 主循环 2ms 心跳判 2 次无字节)
 *******************************************************************************/
 #include "CH57x_common.h"
-#include "uart_debug.h"
 #include "modbus_rtu.h"
 #include "ascii_frame.h"
 
@@ -13,7 +12,7 @@
 #define TX_BUF_SIZE   256
 
 static UINT8  rbuf[ RX_BUF_SIZE ];      /* 接收帧缓冲 */
-static UINT8  rx_cnt = 0;               /* 已收字节数 */
+static UINT16 rx_cnt = 0;               /* 已收字节数 */
 static UINT8  rx_idle = 0;              /* 空闲心跳计数 */
 static UINT8  tbuf[ TX_BUF_SIZE ];      /* 应答缓冲 */
 
@@ -84,7 +83,7 @@ static UINT16 modbus_exception( UINT8 func, UINT8 code, UINT8 *pAck )
 /*******************************************************************************
 * 帧处理: 地址匹配 + CRC 校验 + 功能码分发. 返回应答长度; 0=不应答
 *******************************************************************************/
-static UINT16 modbus_frame_process( const UINT8 *pRec, UINT8 len, UINT8 *pAck )
+static UINT16 modbus_frame_process( const UINT8 *pRec, UINT16 len, UINT8 *pAck )
 {
     UINT16 CrcTmp;
 
