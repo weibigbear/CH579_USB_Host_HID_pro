@@ -29,7 +29,11 @@ static void process_key_events( void )
             if( ev.type == KEV_PRESS && ev.usage == 0x39 )
                 keymap_caps_toggle();                       /* CapsLock 按下切换 */
 
-            /* --- ASCII 帧写入 (Modbus 40001~40128) --- */
+            /* --- ASCII 帧写入 (Modbus 40001~40128) ---
+             * 仅在"按下"(KEV_PRESS)时处理一次, 抬键不再写,
+             * 避免一次敲击重复写入两遍。
+             * 修饰键左手 control(bit1)/左手 GUI(bit5) 合并计作 Shift ——
+             * 对 ASCII 字符映射而言, 只要任一 Shift 态即可(与左右无关)。 */
             if( ev.type == KEV_PRESS )
             {
                 UINT8  sh = ( ( ev.mods >> 1 ) | ( ev.mods >> 5 ) ) & 1;
@@ -40,7 +44,7 @@ static void process_key_events( void )
                 else
                 {
                     const char *s = key_display( ev.usage, sh );
-                    if( ev.usage == 0x2C )                  /* Space: 写空格 */
+                    if( ev.usage == 0x2C )                  /* Space: 写空格(避免 key_display 返回空) */
                         ascii_frame_putch( ' ' );
                     else if( s[ 0 ] >= 0x20 && s[ 0 ] <= 0x7E && s[ 1 ] == 0 )
                         ascii_frame_putch( s[ 0 ] );        /* 单字符可打印才写入 */
@@ -70,8 +74,8 @@ int main()
     GPIOA_ModeCfg( GPIO_Pin_9,  GPIO_ModeOut_PP_5mA );           /* TXD */
     UART1_DefInit();                                             /* 115200 */
 
-    ascii_frame_init();
-    modbus_rtu_init();
+    ascii_frame_init();     /* 清零 Modbus 寄存器组缓冲(40001~40128) */
+    modbus_rtu_init();      /* 初始化 UART3 + PA4/PA5/PA6(RS485) */
 
     up_puts( "\r\nMK5 USB-HID Host start\r\n" );
 
@@ -87,8 +91,8 @@ int main()
             process_key_events();
         }
 
-        ascii_frame_poll();
-        modbus_rtu_poll();
+        ascii_frame_poll();     /* 空闲超时自动提交帧(500ms 可调) */
+        modbus_rtu_poll();      /* 轮询 UART3: 收帧/解析/应答 Modbus 主站 */
 
 /* 串口命令: 'p' 打印状态 'd' 打印丢弃计数 'e' 清空队列(其余字符忽略) */
         if( R8_UART1_LSR & RB_LSR_DATA_RDY )
