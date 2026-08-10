@@ -1,0 +1,10 @@
+{
+  "serial": {
+    "port": "COM4",
+    "baudrate": 115200,
+    "bytesize": 8,
+    "parity": "none",
+    "stopbits": 1,
+    "encoding": "utf-8"
+  }
+}
