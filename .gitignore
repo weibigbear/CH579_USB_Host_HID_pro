@@ -1,0 +1,6 @@
+# Keil build artifacts
+project/build_log.txt
+project/Listings/
+project/Objects/
+project/*.uvguix.*
+project/*.scvd
