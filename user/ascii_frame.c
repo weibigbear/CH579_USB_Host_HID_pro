@@ -30,6 +30,7 @@ void ascii_frame_backspace( void )
     {
         frame_idx --;
         reg_ascii[ frame_idx ] = 0;
+        idle_cnt = 0;
     }
 }
 
