@@ -92,7 +92,7 @@ UINT8 InitRootDevice( void )
                       ThisUsbDev.DeviceStatus = ROOT_DEV_SUCCESS;
                       ThisUsbDev.DeviceType = USB_DEV_CLASS_STORAGE;
                       PRINT( "USB-Disk Ready\n" );
-                      SetUsbSpeed( 1 );  // 默认为全速
+                      SetUsbSpeed( ThisUsbDev.DeviceSpeed );  // 默认为全速
                       return( ERR_SUCCESS );
                   }
                }
@@ -103,7 +103,7 @@ UINT8 InitRootDevice( void )
                        ThisUsbDev.DeviceStatus = ROOT_DEV_SUCCESS;
                        ThisUsbDev.DeviceType = USB_DEV_CLASS_PRINTER;
                        PRINT( "USB-Print Ready\n" );
-                       SetUsbSpeed( 1 );  // 默认为全速    
+                       SetUsbSpeed( ThisUsbDev.DeviceSpeed );  // 默认为全速    
                        return( ERR_SUCCESS );
                    }
                }
@@ -120,14 +120,14 @@ UINT8 InitRootDevice( void )
                        ThisUsbDev.DeviceType = DEV_TYPE_KEYBOARD;
 //	进一步初始化,例如设备键盘指示灯LED等
                        PRINT( "USB-Keyboard Ready\n" );
-                       SetUsbSpeed( 1 );  // 默认为全速
+                       SetUsbSpeed( ThisUsbDev.DeviceSpeed );  // 默认为全速
                        return( ERR_SUCCESS );
                        }
                        else if ( if_cls == 2 ) {
                            ThisUsbDev.DeviceType = DEV_TYPE_MOUSE;
 //	为了以后查询鼠标状态,应该分析描述符,取得中断端口的地址,长度等信息
                            PRINT( "USB-Mouse Ready\n" );
-                            SetUsbSpeed( 1 );  // 默认为全速
+                            SetUsbSpeed( ThisUsbDev.DeviceSpeed );  // 默认为全速
                            return( ERR_SUCCESS );
                        }
                        s = ERR_USB_UNSUPPORT;
@@ -142,7 +142,7 @@ UINT8 InitRootDevice( void )
                             ThisUsbDev.DeviceStatus = ROOT_DEV_SUCCESS;
                             ThisUsbDev.DeviceType = USB_DEV_CLASS_HUB;
                             PRINT( "USB-HUB Ready\n" );
-                            SetUsbSpeed( 1 );  // 默认为全速
+                            SetUsbSpeed( ThisUsbDev.DeviceSpeed );  // 默认为全速
                             return( ERR_SUCCESS );
                         }
                     }
@@ -153,7 +153,7 @@ UINT8 InitRootDevice( void )
 //	需保存端点信息以便主程序进行USB传输
                         ThisUsbDev.DeviceStatus = ROOT_DEV_SUCCESS;
                         ThisUsbDev.DeviceType = DEV_TYPE_UNKNOW;
-                        SetUsbSpeed( 1 );  // 默认为全速
+                        SetUsbSpeed( ThisUsbDev.DeviceSpeed );  // 默认为全速
                         return( ERR_SUCCESS );  /* 未知设备初始化成功 */
                    }
                }

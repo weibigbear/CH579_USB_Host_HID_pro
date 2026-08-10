@@ -322,9 +322,6 @@ int main()
                 up_puts( " UH_LS=" );
                 up_printf( "%x\r\n", ( R8_UHOST_CTRL & RB_UH_LOW_SPEED ) ? 1 : 0 );
 
-                /* 验证假设(临时): 恢复设备实际速度, 库修复后移除 */
-                SetUsbSpeed( ThisUsbDev.DeviceSpeed );
-
                 kbd_ifnum = ( ThisUsbDev.GpVar[ 2 ] == 0xFF ) ? 0 : ThisUsbDev.GpVar[ 2 ];
 
                 /* 关键: 组合接收器必须两个 HID 接口都初始化(SetIdle/SetProto/读报告描述符)
