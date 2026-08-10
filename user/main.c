@@ -6,6 +6,46 @@
 __align(4) UINT8  RxBuffer[ MAX_PACKET_SIZE ];  // IN, must even address
 __align(4) UINT8  TxBuffer[ MAX_PACKET_SIZE ];  // OUT, must even address
 
+/*******************************************************************************
+* 按键事件抽象层: 事件环形队列 + 解析/消费解耦
+*******************************************************************************/
+#define KEV_PRESS     0
+#define KEV_RELEASE   1
+#define KEY_EV_QUEUE_SIZE  16
+
+typedef struct
+{
+    UINT8   type;      /* KEV_PRESS / KEV_RELEASE */
+    UINT8   mods;      /* bit0 Shift bit1 Ctrl bit2 Alt bit3 GUI */
+    UINT8   ifidx;     /* 0=键盘 1=多媒体 */
+    UINT16  usage;     /* HID usage 码 */
+} key_event_t;
+
+static key_event_t  evq[ KEY_EV_QUEUE_SIZE ];
+static UINT8  evq_head = 0, evq_tail = 0, evq_cnt = 0;
+static UINT32 ev_drop = 0;
+
+static UINT8 kbd_ev_push( UINT8 type, UINT8 mods, UINT8 ifidx, UINT16 usage )
+{
+    if( evq_cnt >= KEY_EV_QUEUE_SIZE ) { ev_drop ++; return 0; }
+    evq[ evq_head ].type  = type;
+    evq[ evq_head ].mods  = mods;
+    evq[ evq_head ].ifidx = ifidx;
+    evq[ evq_head ].usage = usage;
+    evq_head = ( UINT8 )( ( evq_head + 1 ) % KEY_EV_QUEUE_SIZE );
+    evq_cnt ++;
+    return 1;
+}
+
+static UINT8 kbd_ev_pop( key_event_t *ev )
+{
+    if( evq_cnt == 0 ) return 0;
+    *ev = evq[ evq_tail ];
+    evq_tail = ( UINT8 )( ( evq_tail + 1 ) % KEY_EV_QUEUE_SIZE );
+    evq_cnt --;
+    return 1;
+}
+
 /* 轮询统计, 每个心跳窗口清零 */
 static UINT32  diag_poll = 0;   /* 发起的 IN 次数 */
 static UINT32  diag_ok   = 0;   /* 成功收到数据 */
@@ -192,7 +232,7 @@ static UINT8 HID_SetProtocol( UINT8 infc, UINT8 proto )
 
 /* 获取 HID 报告描述符,bmRequestType=0x81(IN,标准,接口) bRequest=GET_DESCRIPTOR
    wValue=REPORT(0x22)<<8, wIndex=interface, 仅用于"碰一下"接口激活其上报引擎 */
-static UINT8 HID_GetReportDescr( UINT8 infc )
+static UINT8 HID_GetReportDescr( UINT8 infc, UINT8 *retlen )
 {
     UINT8  s, len;
     /* bmRequestType=0x81 bRequest=0x06 wValue=0x2200 wLength=64 */
@@ -200,18 +240,157 @@ static UINT8 HID_GetReportDescr( UINT8 infc )
     CopySetupReqPkg( (PCHAR)getrep );
     pSetupReq -> wIndex = infc;
     s = HostCtrlTransfer( Com_Buffer, &len );
+    *retlen = len;
     return( s );
 }
 
-/* 轮询两个 IN 端点; 收到报告且与上次不同才打印(去重)
-   报告格式: [0]=修饰键 [1]=保留 [2..7]=按键码 */
-static void PollKeyboard( void )
+/*******************************************************************************
+* 键盘报告解析: 与上次按下集合对比生成 按下/释放 事件
+* 报告格式: [0]=修饰键 [1]=保留 [2..7]=按键码
+*******************************************************************************/
+static void parse_kbd_report( UINT8 *buf, UINT8 len )
 {
-    static UINT8  last[ 8 ];
-    static UINT8  last_len = 0;
-    static UINT8  last_ep  = 0;
-    UINT8  n, i, len, ep, s;
-    UINT8  same;
+    static UINT8 last_keys[ 6 ];
+    static UINT8 last_mods = 0;
+    UINT8  i, j, mods, found;
+
+    if( len < 3 ) return;
+    mods = buf[ 0 ] & 0x0F;
+
+    /* 释放: 上次有而本次无 */
+    for( i = 0; i < 6; i ++ )
+    {
+        if( last_keys[ i ] == 0 ) continue;
+        found = 0;
+        for( j = 2; j < len; j ++ )
+            if( buf[ j ] == last_keys[ i ] ) { found = 1; break; }
+        if( !found )
+            kbd_ev_push( KEV_RELEASE, last_mods, 0, last_keys[ i ] );
+    }
+    /* 按下: 本次有而上次无 */
+    for( j = 2; j < len; j ++ )
+    {
+        if( buf[ j ] == 0 ) continue;
+        found = 0;
+        for( i = 0; i < 6; i ++ )
+            if( last_keys[ i ] == buf[ j ] ) { found = 1; break; }
+        if( !found )
+            kbd_ev_push( KEV_PRESS, mods, 0, buf[ j ] );
+    }
+    /* 更新快照 */
+    for( i = 0; i < 6; i ++ ) last_keys[ i ] = 0;
+    for( i = 0, j = 2; j < len && i < 6; j ++ ) last_keys[ i ++ ] = buf[ j ];
+    last_mods = mods;
+}
+
+/*******************************************************************************
+* Consumer 页 usage 名字表 (Task 5 实测后校正)
+*******************************************************************************/
+static const char *consumer_usage_name( UINT16 u )
+{
+    switch( u )
+    {
+        case 0x00E2: return "Mute";
+        case 0x00E9: return "Vol+";
+        case 0x00EA: return "Vol-";
+        case 0x00B5: return "Next";
+        case 0x00B6: return "Prev";
+        case 0x00B7: return "Stop";
+        case 0x00CD: return "Play/Pause";
+        case 0x0223: return "Home";
+        case 0x0224: return "Back";
+        default:     return 0;
+    }
+}
+
+/*******************************************************************************
+* Consumer 报告解析: 按 16 位 usage 数组解码 (与上次对比生成 按下/释放 事件)
+* 若 Task 3 实测抓到的报告描述符不是 16 位 usage 数组结构, 按实测调整
+*******************************************************************************/
+static void parse_consumer_report( UINT8 *buf, UINT8 len )
+{
+    static UINT16 last_cu[ 4 ];
+    static UINT8  last_n = 0;
+    UINT16 cur[ 4 ];
+    UINT8  n = 0, i, j, found;
+
+    if( len < 2 ) return;
+    for( j = 0; j + 1 < len && n < 4; j += 2 )
+    {
+        UINT16 u = ( UINT16 )( buf[ j ] | ( buf[ j + 1 ] << 8 ) );
+        if( u ) cur[ n ++ ] = u;
+    }
+    /* 释放 */
+    for( i = 0; i < last_n; i ++ )
+    {
+        found = 0;
+        for( j = 0; j < n; j ++ )
+            if( cur[ j ] == last_cu[ i ] ) { found = 1; break; }
+        if( !found )
+            kbd_ev_push( KEV_RELEASE, 0, 1, last_cu[ i ] );
+    }
+    /* 按下 */
+    for( j = 0; j < n; j ++ )
+    {
+        found = 0;
+        for( i = 0; i < last_n; i ++ )
+            if( last_cu[ i ] == cur[ j ] ) { found = 1; break; }
+        if( !found )
+            kbd_ev_push( KEV_PRESS, 0, 1, cur[ j ] );
+    }
+    for( i = 0; i < n; i ++ ) last_cu[ i ] = cur[ i ];
+    last_n = n;
+}
+
+static void up_puthex4( UINT16 v )
+{
+    static const char hx[] = "0123456789ABCDEF";
+    char tmp[5]; int i = 4; tmp[4] = 0;
+    do { tmp[--i] = hx[v & 0xF]; v >>= 4; } while( i > 0 );
+    up_puts( &tmp[i] );
+}
+
+/*******************************************************************************
+* 消费: 弹空队列 → UART 打印
+*******************************************************************************/
+static void process_key_events( void )
+{
+    key_event_t ev;
+    while( kbd_ev_pop( &ev ) )
+    {
+        if( ev.ifidx == 1 )
+        {
+            const char *n = consumer_usage_name( ev.usage );
+            up_puts( "MEDIA: [1] " );
+            up_puts( ev.type == KEV_PRESS ? "DN " : "UP " );
+            if( n ) up_puts( n );
+            else { up_puts( "0x" ); up_puthex4( ev.usage ); }
+            up_puts( "\r\n" );
+        }
+        else
+        {
+            up_puts( "KEY:  [0] " );
+            up_puts( ev.type == KEV_PRESS ? "DN " : "UP " );
+            up_puts( "\"" );
+            up_puts( scancode_to_str( ( UINT8 )ev.usage ) );
+            up_puts( "\" (mods=" );
+            up_puthex( ev.mods );
+            up_puts( ")\r\n" );
+        }
+    }
+}
+
+static void dump_bytes( const UINT8 *p, UINT8 n )
+{
+    UINT8 i;
+    for( i = 0; i < n; i ++ ) { up_puthex( p[ i ] ); up_puts( " " ); }
+    up_puts( "\r\n" );
+}
+
+/* 轮询两个 IN 端点; 按来源接口分发到对应解析器 */
+static void PollHIDEndpoints( void )
+{
+    UINT8  i, ep, s, len;
 
     for( i = 0; i < 2; i ++ )
     {
@@ -222,7 +401,7 @@ static void PollKeyboard( void )
         s = USBHostTransact( ( USB_PID_IN << 4 ) | ep, RB_UH_R_AUTO_TOG, 50 );
         if( s != ERR_SUCCESS )
         {
-            if( s == ( USB_PID_NAK | ERR_USB_TRANSFER ) ) { diag_nak ++; continue; } /* 空闲NAK */
+            if( s == ( USB_PID_NAK | ERR_USB_TRANSFER ) ) { diag_nak ++; continue; }
             diag_err ++;
             if( s == ERR_USB_DISCON ) up_puts( "\r\ndev out\r\n" );
             continue;
@@ -231,47 +410,15 @@ static void PollKeyboard( void )
         diag_ok ++;
         len = R8_USB_RX_LEN;
         if( len > 8 ) len = 8;
-
-        /* 去重: 同端点且内容与上次相同则跳过 */
-        same = ( ep == last_ep ) && ( len == last_len );
-        if( same )
-        {
-            for( n = 0; n < len; n ++ )
-                if( RxBuffer[ n ] != last[ n ] ) { same = 0; break; }
-        }
-        if( same ) continue;
-
-        up_puts( "KEY: " );
-        {
-            UINT8  any = 0, k;
-            for( k = 2; k < len; k ++ )
-            {
-                if( RxBuffer[ k ] )
-                {
-                    if( any ) up_puts( "+" );
-                    up_puts( scancode_to_str( RxBuffer[ k ] ) );
-                    any = 1;
-                }
-            }
-            if( !any ) up_puts( "-" );   /* 全零: 松开 */
-        }
-        up_puts( " [" );
-        for( n = 0; n < len; n ++ )
-        {
-            if( n ) up_puts( " " );
-            up_puthex( RxBuffer[ n ] );
-        }
-        up_puts( "]\r\n" );
-
-        for( n = 0; n < len; n ++ ) last[ n ] = RxBuffer[ n ];
-        last_len = len;
-        last_ep  = ep;
+        if( i == 0 ) parse_kbd_report( RxBuffer, len );
+        else         parse_consumer_report( RxBuffer, len );
     }
 }
 
 int main()
 {
     UINT8  s;
+    UINT8  rlen;
 
     SetSysClock( CLK_SOURCE_HSE_32MHz );                 /* 外部32M晶振 */
     PWR_UnitModCfg( ENABLE, UNIT_SYS_PLL );              /* 开PLL */
@@ -324,20 +471,23 @@ int main()
 
                 kbd_ifnum = ( ThisUsbDev.GpVar[ 2 ] == 0xFF ) ? 0 : ThisUsbDev.GpVar[ 2 ];
 
-                /* 关键: 组合接收器必须两个 HID 接口都初始化(SetIdle/SetProto/读报告描述符)
-                   后才启动上报引擎, 只碰键盘接口会导致永久 NAK */
                 up_puts( "if0: " );
-                up_printf( "%x %x %x\r\n",
+                up_printf( "%x %x ",
                     ( UINT8 )HID_SetIdle( kbd_ifnum, 0x0A ),
-                    ( UINT8 )HID_SetProtocol( kbd_ifnum, 0 ),
-                    ( UINT8 )HID_GetReportDescr( kbd_ifnum ) );
+                    ( UINT8 )HID_SetProtocol( kbd_ifnum, 0 ) );
+                s = HID_GetReportDescr( kbd_ifnum, &rlen );
+                up_printf( "%x\r\n", s );
+                if( s == ERR_SUCCESS ) { up_puts( "rep0: " ); dump_bytes( Com_Buffer, rlen ); }
+
                 if( ThisUsbDev.GpVar[ 1 ] != 0 )
                 {
                     up_puts( "if1: " );
-                    up_printf( "%x %x %x\r\n",
+                    up_printf( "%x %x ",
                         ( UINT8 )HID_SetIdle( 1, 0x0A ),
-                        ( UINT8 )HID_SetProtocol( 1, 0 ),
-                        ( UINT8 )HID_GetReportDescr( 1 ) );
+                        ( UINT8 )HID_SetProtocol( 1, 0 ) );
+                    s = HID_GetReportDescr( 1, &rlen );
+                    up_printf( "%x\r\n", s );
+                    if( s == ERR_SUCCESS ) { up_puts( "rep1: " ); dump_bytes( Com_Buffer, rlen ); }
                 }
             }
         }
@@ -348,14 +498,16 @@ int main()
                 ThisUsbDev.GpVar[ 0 ] != 0 ||
                 ThisUsbDev.DeviceType == DEV_TYPE_UNKNOW )
             {
-                PollKeyboard();
+                PollHIDEndpoints();
+                process_key_events();
             }
         }
 
-/* 串口命令: 'p' 打印状态(其余字符忽略) */
+/* 串口命令: 'p' 打印状态 'd' 打印丢弃计数 'e' 清空队列(其余字符忽略) */
         if( R8_UART1_LSR & RB_LSR_DATA_RDY )
         {
-            if( R8_UART1_RBR == 'p' )
+            UINT8 c = R8_UART1_RBR;
+            if( c == 'p' )
             {
                 up_puts( "st=" );
                 up_printf( "%x", ThisUsbDev.DeviceStatus );
@@ -368,6 +520,18 @@ int main()
                 up_puts( " attach=" );
                 up_printf( "%x", ( R8_USB_MIS_ST & RB_UMS_DEV_ATTACH ) ? 1 : 0 );
                 up_puts( "\r\n" );
+            }
+            else if( c == 'd' )
+            {
+                up_puts( "drop=" );
+                up_putdec( ev_drop );
+                up_puts( "\r\n" );
+            }
+            else if( c == 'e' )
+            {
+                evq_head = evq_tail = evq_cnt = 0;
+                ev_drop = 0;
+                up_puts( "q clr\r\n" );
             }
         }
 
