@@ -395,6 +395,11 @@
               <FileType>1</FileType>
               <FilePath>..\user\keymap.c</FilePath>
             </File>
+            <File>
+              <FileName>ascii_frame.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\ascii_frame.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -600,6 +605,11 @@
               <FileName>uart_debug.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\bsp\uart_debug.c</FilePath>
+            </File>
+            <File>
+              <FileName>modbus_rtu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\bsp\modbus_rtu.c</FilePath>
             </File>
           </Files>
         </Group>

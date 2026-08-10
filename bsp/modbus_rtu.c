@@ -116,7 +116,7 @@ static void uart3_send( const UINT8 *buf, UINT16 len )
         R8_UART3_THR = buf[ i ];
     }
     while( !( R8_UART3_LSR & RB_LSR_TX_ALL_EMP ) ) ;            /* 最后字节移位完 */
-    GPIOA_ClearBits( GPIO_Pin_6 );                              /* 回接收 */
+    GPIOA_ResetBits( GPIO_Pin_6 );                              /* 回接收 */
 }
 
 /*******************************************************************************
@@ -127,7 +127,7 @@ void modbus_rtu_init( void )
     GPIOA_ModeCfg( GPIO_Pin_4, GPIO_ModeIN_PU );                /* RXD3 上拉输入 */
     GPIOA_ModeCfg( GPIO_Pin_5, GPIO_ModeOut_PP_5mA );           /* TXD3 推挽 */
     GPIOA_ModeCfg( GPIO_Pin_6, GPIO_ModeOut_PP_5mA );           /* RE/DE 推挽 */
-    GPIOA_ClearBits( GPIO_Pin_6 );                              /* 初始接收方向 */
+    GPIOA_ResetBits( GPIO_Pin_6 );                              /* 初始接收方向 */
     UART3_DefInit();
     UART3_BaudRateCfg( MODBUS_BAUD );
     rx_cnt = 0;
