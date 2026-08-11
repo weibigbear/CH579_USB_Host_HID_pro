@@ -1,8 +1,9 @@
 /*******************************************************************************
 * modbus_rtu.c — Modbus RTU 从机协议层实现(UART3)
 *
-* 协议能力: 仅支持功能码 0x03 读保持寄存器(40001~40128), 与 ascii_frame 缓冲对接。
-*   不支持写操作/其他功能码(按要求返回异常 0x01 非法功能)。
+* 协议能力: 功能码 0x03 读保持寄存器(数据区 40001~40128 + 配置区 0x0080/0x0081)
+*   与 0x06 写单个寄存器(仅配置区, DataFlash 掉电保存)。
+*   地址/波特率为运行时配置, 来自 modbus_cfg 模块。
 *
 * Modbus RTU 请求帧格式:
 *   [从机地址 1B][功能码 1B][数据 nB][CRC16 低字节][CRC16 高字节]
@@ -14,16 +15,18 @@
 *
 * 异常应答帧:
 *   [从机地址][功能码|0x80][异常码 1B][CRC]
-*   0x01 非法功能(非 0x03) / 0x02 非法数据地址或数量(数量=0、>125、越界)。
+*   0x01 非法功能(非 0x03/0x06) / 0x02 非法数据地址或数量 / 0x03 非法数据值。
 *
-* 帧边界判定(参考 step2 注释): 9600 下 3.5 字符空闲 ≈ 3.65ms,
+* 帧边界判定(参考 step2 注释): 默认 9600 下 3.5 字符空闲 ≈ 3.65ms,
 *   主循环每 2ms 心跳, 连续 2 次心跳(RB_LSR_DATA_RDY 无新数据)判为帧结束。
 *
 * 硬件依赖: UART3 (TXD3=PA5 / RXD3=PA4), PA6 作 RS485 收发方向控制。
 *******************************************************************************/
 #include "CH57x_common.h"
 #include "modbus_rtu.h"
+#include "modbus_cfg.h"
 #include "ascii_frame.h"
+#include "uart_debug.h"
 
 /* 接收/发送缓冲大小: 最大合法 0x03 请求 8B, 最大正常应答 128*2+5=261B。
    Modbus 单次最多读 125 寄存器 → 应答 253B; 缓冲 256 留够余量。 */
@@ -34,6 +37,8 @@ static UINT8  rbuf[ RX_BUF_SIZE ];      /* 接收帧缓冲(暂存一整帧) */
 static UINT16 rx_cnt = 0;               /* 已收字节数(当前帧长度) */
 static UINT8  rx_idle = 0;              /* 空闲心跳计数(无新字节的次数) */
 static UINT8  tbuf[ TX_BUF_SIZE ];      /* 应答帧缓冲(含 CRC) */
+static UINT8  g_addr = MODBUS_DEF_ADDR; /* 运行时从机地址(0x06 可改) */
+static UINT8  g_baud = MODBUS_DEF_BAUD; /* 运行时波特率索引(0x06 可改) */
 
 /*******************************************************************************
 * CRC16 Modbus (Poly 0xA001, 逐位运算, 无查表)
@@ -71,19 +76,37 @@ static UINT16 modbus_cmd03_ack( const UINT8 *pRec, UINT8 *pAck )
     Cnt     = ( UINT16 )( ( pRec[ 4 ] << 8 ) | pRec[ 5 ] );
 
     if( Cnt == 0 || Cnt > 125 ) return 0;                       /* 数量非法(限 125) */
-    if( ( UINT32 )RegAddr + Cnt > ASCII_FRAME_SIZE ) return 0;  /* 越界(寄存器组只有 128) */
 
     /* 组装应答头: 地址 + 功能码 + 数据字节数(=寄存器数*2) */
-    pAck[ 0 ] = MODBUS_ADDR;
+    pAck[ 0 ] = g_addr;
     pAck[ 1 ] = 0x03;
     pAck[ 2 ] = ( UINT8 )( Cnt * 2 );                           /* 数据字节数 */
     AckLen = 3;
+
+    /* 配置区(0x0080/0x0081): 仅支持单寄存器读取 */
+    if( RegAddr >= MODBUS_CFG_ADDR_REG )
+    {
+        UINT8 val = 0;
+        if( Cnt != 1 ) return 0;                                /* 配置区只允许数量=1 */
+        if( RegAddr == MODBUS_CFG_ADDR_REG ) val = g_addr;
+        else if( RegAddr == MODBUS_CFG_BAUD_REG ) val = g_baud;
+        else return 0;                                          /* 未知配置地址→异常 0x02 */
+        pAck[ AckLen ++ ] = 0x00;
+        pAck[ AckLen ++ ] = val;
+        goto ack_done;
+    }
+
+    /* 数据区 0x0000~0x007F: 越界检查 */
+    if( ( UINT32 )RegAddr + Cnt > ASCII_FRAME_SIZE ) return 0;  /* 越界(寄存器组只有 128) */
+
     /* 逐寄存器: 高字节恒 0, 低字节取对应 ascii_frame 值 */
     for( i = 0; i < Cnt; i ++ )
     {
         pAck[ AckLen ++ ] = 0x00;                               /* 高字节 */
         pAck[ AckLen ++ ] = ascii_frame_get( ( UINT8 )( RegAddr + i ) );  /* 低字节 ASCII */
     }
+
+ack_done:
     /* 追加 CRC(低字节在前) */
     CrcTmp = CRC16( pAck, AckLen );
     pAck[ AckLen ++ ] = ( UINT8 )( CrcTmp & 0xFF );
@@ -98,7 +121,7 @@ static UINT16 modbus_cmd03_ack( const UINT8 *pRec, UINT8 *pAck )
 static UINT16 modbus_exception( UINT8 func, UINT8 code, UINT8 *pAck )
 {
     UINT16 CrcTmp, AckLen;
-    pAck[ 0 ] = MODBUS_ADDR;
+    pAck[ 0 ] = g_addr;
     pAck[ 1 ] = ( UINT8 )( func | 0x80 );       /* 异常标志: 最高位置 1 */
     pAck[ 2 ] = code;                           /* 异常码: 0x01/0x02 */
     AckLen = 3;
@@ -106,6 +129,52 @@ static UINT16 modbus_exception( UINT8 func, UINT8 code, UINT8 *pAck )
     pAck[ AckLen ++ ] = ( UINT8 )( CrcTmp & 0xFF );
     pAck[ AckLen ++ ] = ( UINT8 )( CrcTmp >> 8 );
     return AckLen;
+}
+
+/*******************************************************************************
+* 0x06 写单个寄存器(仅配置区 0x0080/0x0081)。
+* 成功: 应答 = 请求原样回显(Modbus 0x06 标准)。
+* 失败: 返回 0(非法数据值→0x03) 或 0xFFFF(非法地址→0x02)。
+* 波特率写后立即重配 UART3(主站需切新波特率重连)。
+*******************************************************************************/
+static UINT16 modbus_cmd06_ack( const UINT8 *pRec, UINT8 *pAck )
+{
+    UINT16 RegAddr, Value;
+    UINT8  st;
+
+    RegAddr = ( UINT16 )( ( pRec[ 2 ] << 8 ) | pRec[ 3 ] );
+    Value   = ( UINT16 )( ( pRec[ 4 ] << 8 ) | pRec[ 5 ] );
+
+    if( RegAddr == MODBUS_CFG_ADDR_REG )
+    {
+        if( Value < 1 || Value > 247 ) return 0;                /* 非法数据值→0x03 */
+        st = modbus_cfg_set_addr( ( UINT8 )Value );
+        if( st != 0 ) return 0;
+        if( modbus_cfg_save() != 0 )
+            up_puts( "cfg save fail\r\n" );                     /* 保存失败仅警告 */
+        g_addr = ( UINT8 )Value;
+    }
+    else if( RegAddr == MODBUS_CFG_BAUD_REG )
+    {
+        if( Value >= MODBUS_BAUD_NUM ) return 0;                /* 非法数据值→0x03 */
+        st = modbus_cfg_set_baud( ( UINT8 )Value );
+        if( st != 0 ) return 0;
+        if( modbus_cfg_save() != 0 )
+            up_puts( "cfg save fail\r\n" );                     /* 保存失败仅警告 */
+        g_baud = ( UINT8 )Value;
+        UART3_BaudRateCfg( modbus_baud_table[ g_baud ] );       /* 立即生效 */
+    }
+    else
+    {
+        return 0xFFFF;                                          /* 非法地址→0x02 */
+    }
+
+    /* 成功: 原样回显请求帧(含 CRC) */
+    {
+        UINT8 i;
+        for( i = 0; i < 8; i ++ ) pAck[ i ] = pRec[ i ];
+    }
+    return 8;
 }
 
 /*******************************************************************************
@@ -118,7 +187,7 @@ static UINT16 modbus_frame_process( const UINT8 *pRec, UINT16 len, UINT8 *pAck )
     UINT16 CrcTmp;
 
     if( len < 8 ) return 0;                                     /* 帧太短(最小 8B) */
-    if( pRec[ 0 ] != MODBUS_ADDR ) return 0;                    /* 地址不匹配(含广播0: 从机不响应广播) */
+    if( pRec[ 0 ] != g_addr ) return 0;                         /* 地址不匹配(含广播0: 从机不响应广播) */
 
     /* 取帧尾的 CRC(低字节在前: len-2 存低位, len-1 存高位)并比对 */
     CrcTmp = ( UINT16 )( ( pRec[ len - 1 ] << 8 ) | pRec[ len - 2 ] );
@@ -128,6 +197,13 @@ static UINT16 modbus_frame_process( const UINT8 *pRec, UINT16 len, UINT8 *pAck )
     {
         UINT16 n = modbus_cmd03_ack( pRec, pAck );
         if( n == 0 ) return modbus_exception( 0x03, 0x02, pAck );  /* 参数非法→异常 0x02 */
+        return n;
+    }
+    if( pRec[ 1 ] == 0x06 )                                     /* 功能码 0x06 写单个寄存器(配置) */
+    {
+        UINT16 n = modbus_cmd06_ack( pRec, pAck );
+        if( n == 0 )      return modbus_exception( 0x06, 0x03, pAck );  /* 非法数据值→0x03 */
+        if( n == 0xFFFF ) return modbus_exception( 0x06, 0x02, pAck );  /* 非法地址→0x02 */
         return n;
     }
     return modbus_exception( pRec[ 1 ], 0x01, pAck );           /* 其他功能码→异常 0x01 */
@@ -159,12 +235,16 @@ static void uart3_send( const UINT8 *buf, UINT16 len )
 *******************************************************************************/
 void modbus_rtu_init( void )
 {
+    modbus_cfg_init();                                          /* 上电加载配置(无效则默认) */
+    g_addr = modbus_cfg_get_addr();
+    g_baud = modbus_cfg_get_baud();
+
     GPIOA_ModeCfg( GPIO_Pin_4, GPIO_ModeIN_PU );                /* RXD3 上拉输入 */
     GPIOA_ModeCfg( GPIO_Pin_5, GPIO_ModeOut_PP_5mA );           /* TXD3 推挽输出 */
     GPIOA_ModeCfg( GPIO_Pin_6, GPIO_ModeOut_PP_5mA );           /* RE/DE 推挽输出 */
     GPIOA_ResetBits( GPIO_Pin_6 );                              /* 初始接收方向(DE=0) */
     UART3_DefInit();                                            /* UART3 默认 8 数据位, 无校验, 1 停止位 */
-    UART3_BaudRateCfg( MODBUS_BAUD );                           /* 设波特率 9600 */
+    UART3_BaudRateCfg( modbus_baud_table[ g_baud ] );           /* 运行时波特率 */
     rx_cnt  = 0;                                                /* 清接收状态 */
     rx_idle = 0;
 }
