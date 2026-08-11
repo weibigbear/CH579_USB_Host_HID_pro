@@ -1,9 +1,10 @@
 /*******************************************************************************
 * modbus_rtu.h — Modbus RTU 从机模块接口
 *
-* 功能定位: 在 UART3 上实现 Modbus RTU 从机(地址 1, 9600 8N1),
-*   应答主站的 0x03 读保持寄存器请求。寄存器内容来自 ascii_frame 模块
-*   (键盘 ASCII 缓冲), 本模块只负责收发帧 + CRC + 协议解析。
+* 功能定位: 在 UART3 上实现 Modbus RTU 从机, 应答 0x03 读保持寄存器
+*   (键盘 ASCII 数据区 + 配置区)与 0x06 写配置寄存器(地址/波特率)。
+*   地址与波特率运行时取自 modbus_cfg 模块(DataFlash 掉电保存)。
+*   本模块只负责收发帧 + CRC + 协议解析。
 *
 * 硬件接线(RS485):
 *   TXD3 = PA5(推挽输出)  ->  485 收发器的 DI
@@ -24,8 +25,8 @@
 
 #include "CH57x_common.h"
 
-#define MODBUS_ADDR         1           /* 从机地址, 可调(0x00=广播不响应) */
-#define MODBUS_BAUD         9600        /* 波特率, 可调(需与主站一致) */
+#define MODBUS_CFG_ADDR_REG 0x0080      /* 0x06 写: 从机地址配置寄存器(1~247) */
+#define MODBUS_CFG_BAUD_REG 0x0081      /* 0x06 写: 波特率索引配置寄存器(0~4) */
 
 void modbus_rtu_init( void );           /* UART3 + RS485 引脚初始化 */
 void modbus_rtu_poll( void );           /* 主循环调用: 收帧/解析/应答 */
