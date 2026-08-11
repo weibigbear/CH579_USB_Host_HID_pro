@@ -37,8 +37,8 @@ static UINT8  rbuf[ RX_BUF_SIZE ];      /* 接收帧缓冲(暂存一整帧) */
 static UINT16 rx_cnt = 0;               /* 已收字节数(当前帧长度) */
 static UINT8  rx_idle = 0;              /* 空闲心跳计数(无新字节的次数) */
 static UINT8  tbuf[ TX_BUF_SIZE ];      /* 应答帧缓冲(含 CRC) */
-static UINT8  g_addr = MODBUS_DEF_ADDR; /* 运行时从机地址(0x06 可改) */
-static UINT8  g_baud = MODBUS_DEF_BAUD; /* 运行时波特率索引(0x06 可改) */
+static UINT8  g_addr = MODBUS_DEF_ADDR; /* 运行时从机地址(唯一写者: 0x06 处理与 init 加载) */
+static UINT8  g_baud = MODBUS_DEF_BAUD; /* 运行时波特率索引(唯一写者: 0x06 处理与 init 加载) */
 
 /*******************************************************************************
 * CRC16 Modbus (Poly 0xA001, 逐位运算, 无查表)
@@ -123,7 +123,7 @@ static UINT16 modbus_exception( UINT8 func, UINT8 code, UINT8 *pAck )
     UINT16 CrcTmp, AckLen;
     pAck[ 0 ] = g_addr;
     pAck[ 1 ] = ( UINT8 )( func | 0x80 );       /* 异常标志: 最高位置 1 */
-    pAck[ 2 ] = code;                           /* 异常码: 0x01/0x02 */
+    pAck[ 2 ] = code;                           /* 异常码: 0x01/0x02/0x03 */
     AckLen = 3;
     CrcTmp = CRC16( pAck, AckLen );
     pAck[ AckLen ++ ] = ( UINT8 )( CrcTmp & 0xFF );
