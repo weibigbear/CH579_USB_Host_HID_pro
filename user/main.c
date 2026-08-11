@@ -77,12 +77,24 @@ int main()
     ascii_frame_init();     /* 清零 Modbus 寄存器组缓冲(40001~40128) */
     modbus_rtu_init();      /* 初始化 UART3 + PA4/PA5/PA6(RS485) */
 
+/* S3: 复位原因诊断——上次是否为看门狗复位 */
+    if( SYS_GetLastResetSta() & RB_RESET_FLAG )
+        up_puts( "WDOG reset\r\n" );
+    else
+        up_puts( "reset: normal\r\n" );
+
+/* S1: 使能看门狗, 溢出即复位(初值 250 → 32MHz 下约 1s 超时) */
+    WWDG_ResetCfg( ENABLE );
+    WWDG_SetCounter( 250 );
+
     up_puts( "\r\nMK5 USB-HID Host start\r\n" );
 
     usb_hid_init();
 
     while(1)
     {
+        WWDG_SetCounter( 250 );     /* 每 2ms 心跳喂狗, 防饿狗(含 Modbus 阻塞后) */
+
         usb_hid_poll();
 
         if( usb_hid_device_ready() )
