@@ -141,6 +141,8 @@ print(resp.hex(' '))                             # 期望: 01 03 0A 00 41 ...
 
 测试通过后接 RS485 只需把 PA4/PA5/PA6 连到收发器（PA6 经 1k 电阻接 RE/DE，收发器 5V 供电），**代码无需改动**。
 
+完整协议说明（寄存器映射/功能码/异常码/帧示例）见 [`docs/modbus.md`](docs/modbus.md)。
+
 ## 构建
 
 使用 Keil MDK（UV4）打开 `project/CH579_USB_Host_HID.uvprojx` 编译。
