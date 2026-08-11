@@ -77,8 +77,8 @@ int main()
     ascii_frame_init();     /* 清零 Modbus 寄存器组缓冲(40001~40128) */
     modbus_rtu_init();      /* 初始化 UART3 + PA4/PA5/PA6(RS485) */
 
-/* S3: 复位原因诊断——上次是否为看门狗复位 */
-    if( SYS_GetLastResetSta() & RB_RESET_FLAG )
+/* S3: 复位原因诊断——上次是否为看门狗复位(WTR=0x02, 其余复位原因归为正常) */
+    if( SYS_GetLastResetSta() == RST_FLAG_WTR )
         up_puts( "WDOG reset\r\n" );
     else
         up_puts( "reset: normal\r\n" );
