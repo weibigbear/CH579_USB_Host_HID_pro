@@ -305,6 +305,12 @@ void usb_hid_init( void )
     R16_PIN_ANALOG_IE |= RB_PIN_USB_IE;
 
     USB_HostInit();
+
+    /* USB host 为纯轮询模式(读 R8_USB_INT_FG 标志), 不需要 NVIC 中断;
+       关闭中断使能, 避免开全局中断(TIM1/UART3 用)后 USB 中断进入
+       startup 弱定义 handler(B . 死循环)导致系统卡死。
+       FG 标志由硬件独立置位, 关闭 EN 不影响轮询。 */
+    R8_USB_INT_EN = 0;
 }
 
 void usb_hid_poll( void )
