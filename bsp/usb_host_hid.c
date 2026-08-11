@@ -315,6 +315,8 @@ void usb_hid_poll( void )
     s = AnalyzeRootHub();
     if( s == ERR_USB_CONNECT )
     {
+        /* 枚举+HID 配置为阻塞流程, 耗时可能超过看门狗 1s 超时, 期间暂停防饿狗 */
+        WWDG_ResetCfg( DISABLE );
         up_puts( "dev in, enum...\n" );
         s = InitRootDevice();
         up_printf( "InitRootDevice=%x\r\n", s );
@@ -360,6 +362,9 @@ void usb_hid_poll( void )
                 if( s == ERR_SUCCESS ) { up_puts( "rep1: " ); dump_bytes( Com_Buffer, rlen ); }
             }
         }
+        /* 枚举完成, 恢复看门狗并重置计数 */
+        WWDG_ResetCfg( ENABLE );
+        WWDG_SetCounter( 250 );
     }
 }
 
