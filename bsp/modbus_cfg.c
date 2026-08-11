@@ -20,11 +20,10 @@ typedef struct
     UINT32 magic;          /* MODBUS_CFG_MAGIC */
     UINT8  addr;           /* 从机地址 1~247 */
     UINT8  baud;           /* 波特率索引 0~4 */
-    UINT8  rsv[ 2 ];       /* 预留 */
     UINT16 crc;            /* 结构校验(CRC16) */
-} modbus_cfg_t;            /* 共 8 字节, 4 字节对齐 */
+} modbus_cfg_t;            /* 共 8 字节, 4 字节对齐, 无填充 */
 
-static modbus_cfg_t g_cfg = { MODBUS_CFG_MAGIC, MODBUS_DEF_ADDR, MODBUS_DEF_BAUD, {0,0}, 0 };
+static modbus_cfg_t g_cfg = { MODBUS_CFG_MAGIC, MODBUS_DEF_ADDR, MODBUS_DEF_BAUD, 0 };
 
 /*******************************************************************************
 * CRC16 Modbus (Poly 0xA001, 逐位运算) — 与 modbus_rtu.c 内实现一致
@@ -64,8 +63,6 @@ void modbus_cfg_init( void )
         g_cfg.magic = p->magic;
         g_cfg.addr  = p->addr;
         g_cfg.baud  = p->baud;
-        g_cfg.rsv[ 0 ] = p->rsv[ 0 ];
-        g_cfg.rsv[ 1 ] = p->rsv[ 1 ];
         g_cfg.crc   = p->crc;
     }
     else
