@@ -84,8 +84,8 @@ int main()
         up_puts( "reset: normal\r\n" );
 
 /* S1: 使能看门狗, 溢出即复位(初值 250 → 32MHz 下约 1s 超时) */
+    WWDG_SetCounter( 250 );             /* 先重载计数再使能, 防计数恰为 0 的瞬时误复位 */
     WWDG_ResetCfg( ENABLE );
-    WWDG_SetCounter( 250 );
 
     up_puts( "\r\nMK5 USB-HID Host start\r\n" );
 

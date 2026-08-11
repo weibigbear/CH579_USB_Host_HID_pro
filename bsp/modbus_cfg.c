@@ -64,6 +64,14 @@ void modbus_cfg_init( void )
         g_cfg.addr  = p->addr;
         g_cfg.baud  = p->baud;
         g_cfg.crc   = p->crc;
+        /* 防御: 加载值仍须在合法范围, 否则回退默认并回写 */
+        if( g_cfg.addr < 1 || g_cfg.addr > 247 || g_cfg.baud >= MODBUS_BAUD_NUM )
+        {
+            g_cfg.addr = MODBUS_DEF_ADDR;
+            g_cfg.baud = MODBUS_DEF_BAUD;
+            cfg_update_crc();
+            modbus_cfg_save();
+        }
     }
     else
     {

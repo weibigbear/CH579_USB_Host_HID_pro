@@ -362,9 +362,9 @@ void usb_hid_poll( void )
                 if( s == ERR_SUCCESS ) { up_puts( "rep1: " ); dump_bytes( Com_Buffer, rlen ); }
             }
         }
-        /* 枚举完成, 恢复看门狗并重置计数 */
-        WWDG_ResetCfg( ENABLE );
+        /* 枚举完成, 恢复看门狗: 先重载计数再使能, 防计数恰为 0 的瞬时误复位 */
         WWDG_SetCounter( 250 );
+        WWDG_ResetCfg( ENABLE );
     }
 }
 
