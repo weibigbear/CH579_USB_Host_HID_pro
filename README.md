@@ -143,6 +143,8 @@ print(resp.hex(' '))                             # 期望: 01 03 0A 00 41 ...
 
 完整协议说明（寄存器映射/功能码/异常码/帧示例）见 [`docs/modbus.md`](docs/modbus.md)。
 
+完整验收流程（上电自检/看门狗/大帧非阻塞/状态寄存器/错误注入/波特率回归/老化）见 [`docs/test-manual.md`](docs/test-manual.md)。
+
 ## 构建
 
 使用 Keil MDK（UV4）打开 `project/CH579_USB_Host_HID.uvprojx` 编译。

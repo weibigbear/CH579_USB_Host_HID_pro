@@ -22,7 +22,7 @@
 *   UART3 接收中断(RECV_RDY)逐字节收帧, 连续无字节达 3.5T 即判帧结束。
 *   波特率经 0x06 切换时, 帧边界阈值同步联动。
 *
-* 中断依赖: TMR1(100μs tick) + UART3(接收) 两个 NVIC 中断;
+* 中断依赖: TMR1(100μs tick) + UART3(接收 + 发送中断) 两个 NVIC 中断;
 *   USB host 为轮询模式, 其中断源已在 usb_hid_init 中关闭(R8_USB_INT_EN=0),
 *   故开启全局中断不影响 USB 功能。
 *
@@ -34,14 +34,19 @@
 #include "ascii_frame.h"
 #include "uart_debug.h"
 
-/* 接收/发送缓冲大小: 最大合法 0x03 请求 8B, 最大正常应答 128*2+5=261B。
-   Modbus 单次最多读 125 寄存器 → 应答 253B; 缓冲 256 留够余量。 */
+/* 接收/发送缓冲大小: 最大合法 0x03 请求 8B; Modbus 单次最多读 125 寄存器
+   → 最大应答 1+1+1+250+2=255B; 缓冲 256 留够余量。 */
 #define RX_BUF_SIZE   256
 #define TX_BUF_SIZE   256
 
 /* TIM1 空闲计时 tick 周期: 100μs (系统时钟 32MHz → CNT_END=3200)。
    帧边界判定精度 100μs, 115200 下 3.5T≈334μs 仍可分辨。 */
 #define MODBUS_IDLE_TICK_US  100u
+
+/* RS485 DE 拉高到首字节的建立时间(ms): 常规收发器(SP485/MAX485 等)使能
+   建立 <1μs, 1ms 已留 1000 倍余量; 若换用慢收发器可调大, 追求更低响应
+   延迟可调小(≥0.2, 需确认收发器使能规格)。 */
+#define MODBUS_DE_SETTLE_MS  1
 
 /* 3.5 字符时间阈值表(按规范 11bit/字符, 换算成 100μs tick 数, 向上取整):
    9600→3.5*11/9600=4.01ms→41; 19200→2.01ms→21; 38400→1.00ms→11;
@@ -61,23 +66,39 @@ static volatile UINT16 g_idle_thresh = 41;/* 当前波特率 3.5T 对应 tick �
 static UINT8  tbuf[ TX_BUF_SIZE ];        /* 应答帧缓冲(含 CRC) */
 static UINT8  g_addr = MODBUS_DEF_ADDR;   /* 运行时从机地址(唯一写者: 0x06 处理与 init 加载) */
 static UINT8  g_baud = MODBUS_DEF_BAUD;   /* 运行时波特率索引(唯一写者: 0x06 处理与 init 加载) */
+static UINT8  g_reset_cause = 0;          /* 上次复位原因(main 上电记录, 0x0082 读) */
+static UINT16 g_frames_ok   = 0;          /* 已处理帧数(地址匹配且 CRC 通过, 0x0083 读) */
+static UINT16 g_crc_err     = 0;          /* CRC 错误帧数(含过短帧, 0x0084 读) */
+static UINT16 g_key_drop    = 0;          /* 按键事件丢弃计数(main 每循环推送, 0x0085 读) */
+
+/* 非阻塞发送状态(中断驱动): 应答最长 255B@9600≈266ms, 期间主循环照常运行。
+   tx_state=1 表示 DE 已拉高、帧未发完; DE 回落由 send_start(短帧)与 ISR(长帧)
+   在字节发完瞬间完成, poll 的安全网兜底。
+   tx_buf/tx_idx/tx_len 由主循环(send_start)与 ISR(TX 分支)共享, 均 volatile 防缓存。 */
+static volatile UINT8        tx_state = 0;  /* 0=空闲, 1=发送中 */
+static volatile UINT16       tx_idx = 0;    /* 已写入 FIFO 的字节数 */
+static volatile UINT16       tx_len = 0;    /* 待发送总字节数 */
+static const UINT8 * volatile tx_buf = 0;   /* ISR 续填的数据源(send_start 设定) */
 
 /*******************************************************************************
-* CRC16 Modbus (Poly 0xA001, 逐位运算, 无查表)
-* dataIn 指向待校验数据, length 为数据长度(不含 CRC 两字节)。
-* 算法: 初值 0xFFFF; 每字节先与低 8 位异或; 右移 1 位时若移出位为 1
-*   则再与多项式 0xA001 异或。返回结果低字节在前发送。
+* CRC16 Modbus (Poly 0xA001, 半字节查表, 低位在前发送)
+* 表: 16 项半字节表(4 位一次移位), 每字节两次查表, 比逐位快约 5 倍
+*   (255B 应答 CRC: 逐位 ≈600μs → 查表 ≈130μs @32MHz)。
+* 算法: 初值 0xFFFF; 每字节先与低 4 位异或查表, 再与高 4 位异或查表。
 *******************************************************************************/
+static const UINT16 crc_tab[ 16 ] = {
+    0x0000, 0xCC01, 0xD801, 0x1400, 0xF001, 0x3C00, 0x2800, 0xE401,
+    0xA001, 0x6C00, 0x7800, 0xB401, 0x5000, 0x9C01, 0x8801, 0x4400
+};
+
 static UINT16 CRC16( const UINT8 *dataIn, UINT16 length )
 {
     UINT16 crc = 0xFFFF;
     UINT16 i;
-    UINT8  j;
     for( i = 0; i < length; i ++ )
     {
-        crc ^= dataIn[ i ];             /* 与当前字节低 8 位异或 */
-        for( j = 0; j < 8; j ++ )       /* 逐位处理: 右移 1 位, 移出 1 则异或 0xA001 */
-            crc = ( crc & 1 ) != 0 ? ( ( crc >> 1 ) ^ 0xA001 ) : ( crc >> 1 );
+        crc = ( crc >> 4 ) ^ crc_tab[ ( crc ^ dataIn[ i ] ) & 0x0F ];        /* 低半字节 */
+        crc = ( crc >> 4 ) ^ crc_tab[ ( crc ^ ( dataIn[ i ] >> 4 ) ) & 0x0F ];  /* 高半字节 */
     }
     return crc;
 }
@@ -105,14 +126,33 @@ static UINT16 modbus_cmd03_ack( const UINT8 *pRec, UINT8 *pAck )
     pAck[ 2 ] = ( UINT8 )( Cnt * 2 );                           /* 数据字节数 */
     AckLen = 3;
 
-    /* 配置区(0x0080/0x0081): 仅支持单寄存器读取 */
+    /* 配置区/状态区(0x0080~): 仅支持单寄存器读取 */
     if( RegAddr >= MODBUS_CFG_ADDR_REG )
     {
         UINT8 val = 0;
-        if( Cnt != 1 ) return 0;                                /* 配置区只允许数量=1 */
-        if( RegAddr == MODBUS_CFG_ADDR_REG ) val = g_addr;
-        else if( RegAddr == MODBUS_CFG_BAUD_REG ) val = g_baud;
-        else return 0;                                          /* 未知配置地址→异常 0x02 */
+        if( Cnt != 1 ) return 0;                                /* 配置/状态区只允许数量=1 */
+        if( RegAddr == MODBUS_CFG_ADDR_REG )        val = g_addr;
+        else if( RegAddr == MODBUS_CFG_BAUD_REG )   val = g_baud;
+        else if( RegAddr == MODBUS_STAT_RESET_REG ) val = g_reset_cause;
+        else if( RegAddr == MODBUS_STAT_FRAMES_REG )            /* 16 位计数: 高字节在前 */
+        {
+            pAck[ AckLen ++ ] = ( UINT8 )( g_frames_ok >> 8 );
+            pAck[ AckLen ++ ] = ( UINT8 )g_frames_ok;
+            goto ack_done;
+        }
+        else if( RegAddr == MODBUS_STAT_CRCERR_REG )            /* 16 位计数: 高字节在前 */
+        {
+            pAck[ AckLen ++ ] = ( UINT8 )( g_crc_err >> 8 );
+            pAck[ AckLen ++ ] = ( UINT8 )g_crc_err;
+            goto ack_done;
+        }
+        else if( RegAddr == MODBUS_STAT_KEYDROP_REG )           /* 16 位计数: 高字节在前 */
+        {
+            pAck[ AckLen ++ ] = ( UINT8 )( g_key_drop >> 8 );
+            pAck[ AckLen ++ ] = ( UINT8 )g_key_drop;
+            goto ack_done;
+        }
+        else return 0;                                          /* 未知地址→异常 0x02 */
         pAck[ AckLen ++ ] = 0x00;
         pAck[ AckLen ++ ] = val;
         goto ack_done;
@@ -170,19 +210,25 @@ static UINT16 modbus_cmd06_ack( const UINT8 *pRec, UINT8 *pAck )
     if( RegAddr == MODBUS_CFG_ADDR_REG )
     {
         if( Value < 1 || Value > 247 ) return 0;                /* 非法数据值→0x03 */
-        st = modbus_cfg_set_addr( ( UINT8 )Value );
-        if( st != 0 ) return 0;
-        if( modbus_cfg_save() != 0 )
-            up_puts( "cfg save fail\r\n" );                     /* 保存失败仅警告 */
+        if( Value != g_addr )                                   /* 值未变: 跳过擦写, 防磨损+省阻塞 */
+        {
+            st = modbus_cfg_set_addr( ( UINT8 )Value );
+            if( st != 0 ) return 0;
+            if( modbus_cfg_save() != 0 )
+                up_puts( "cfg save fail\r\n" );                 /* 保存失败仅警告 */
+        }
         g_addr = ( UINT8 )Value;
     }
     else if( RegAddr == MODBUS_CFG_BAUD_REG )
     {
         if( Value >= MODBUS_BAUD_NUM ) return 0;                /* 非法数据值→0x03 */
-        st = modbus_cfg_set_baud( ( UINT8 )Value );
-        if( st != 0 ) return 0;
-        if( modbus_cfg_save() != 0 )
-            up_puts( "cfg save fail\r\n" );                     /* 保存失败仅警告 */
+        if( Value != g_baud )                                   /* 值未变: 跳过擦写 */
+        {
+            st = modbus_cfg_set_baud( ( UINT8 )Value );
+            if( st != 0 ) return 0;
+            if( modbus_cfg_save() != 0 )
+                up_puts( "cfg save fail\r\n" );                 /* 保存失败仅警告 */
+        }
         g_baud = ( UINT8 )Value;
         UART3_BaudRateCfg( modbus_baud_table[ g_baud ] );       /* 立即生效 */
         g_idle_thresh = idle_thresh_tab[ g_baud ];              /* 帧边界阈值联动 */
@@ -209,12 +255,13 @@ static UINT16 modbus_frame_process( const UINT8 *pRec, UINT16 len, UINT8 *pAck )
 {
     UINT16 CrcTmp;
 
-    if( len < 8 ) return 0;                                     /* 帧太短(最小 8B) */
+    if( len < 8 ) { g_crc_err ++; return 0; }                   /* 帧太短(最小 8B) */
     if( pRec[ 0 ] != g_addr ) return 0;                         /* 地址不匹配(含广播0: 从机不响应广播) */
 
     /* 取帧尾的 CRC(低字节在前: len-2 存低位, len-1 存高位)并比对 */
     CrcTmp = ( UINT16 )( ( pRec[ len - 1 ] << 8 ) | pRec[ len - 2 ] );
-    if( CrcTmp != CRC16( pRec, len - 2 ) ) return 0;            /* CRC 失败, 静默丢弃 */
+    if( CrcTmp != CRC16( pRec, len - 2 ) ) { g_crc_err ++; return 0; }  /* CRC 失败, 静默丢弃 */
+    g_frames_ok ++;
 
     if( pRec[ 1 ] == 0x03 )                                     /* 功能码 0x03 读保持寄存器 */
     {
@@ -233,24 +280,35 @@ static UINT16 modbus_frame_process( const UINT8 *pRec, UINT16 len, UINT8 *pAck )
 }
 
 /*******************************************************************************
-* UART3 发送(RS485 半双工方向控制):
-*   DE 置高 → 等收发器稳定(2ms) → 逐字节写 FIFO → 等最后一字节移位输出完
-*   → DE 拉低回接收态。
-* 注意: 必须等 TX_ALL_EMP(发送移位寄存器空)才能拉低 DE, 否则帧尾被截断。
-* 阻塞发送: 最大应答 253B @9600 ≈ 262ms, 期间不轮询 USB(可接受短阻塞)。
+* UART3 发送启动(RS485 半双工方向控制, 中断驱动非阻塞):
+*   DE 置高 → 等收发器稳定(2ms) → 预填发送 FIFO(8 深) → 置发送态 → 开 TX 空中断,
+*   剩余字节由 UART3_IRQHandler 的 TX 分支续填, 主循环不被阻塞。
+*   帧尾收尾(等 TX_ALL_EMP 再拉低 DE)由 modbus_rtu_poll 完成。
+* 时序要点(防 ISR 竞争):
+*   - tx_state 在预填完成之后才置 1: 预填/2ms 窗口内 tx_state=0, 即使收到 RX
+*     中断, ISR 的 TX 分支也不执行, 不会与预填循环争抢 THR/tx_idx。
+*   - tx_buf 在 tx_state=1 之前写入, ISR 只在 tx_state=1 时读它, 无半写状态。
+*   - 短帧(≤8B)预填即发完, 不开 TX 中断, 由 poll 的 TX_ALL_EMP 收尾。
+* 帧内连续性: 即使枚举等主循环阻塞窗口撞上应答, ISR 独立续填, 字节流不断
+*   (FIFO 8 深兜底, 间隙远小于 3.5T)。
 *******************************************************************************/
-static void uart3_send( const UINT8 *buf, UINT16 len )
+static void uart3_send_start( const UINT8 *buf, UINT16 len )
 {
-    UINT16 i;
+    tx_buf = buf;                                               /* 先定数据源, ISR 与主循环一致 */
+    tx_idx = 0;
+    tx_len = len;
     GPIOA_SetBits( GPIO_Pin_6 );                                /* DE/RE 使能发送(接 485 的 DI) */
-    mDelaymS( 2 );                                              /* 给收发器建立时间 */
-    for( i = 0; i < len; i ++ )
+    mDelaymS( MODBUS_DE_SETTLE_MS );                            /* 给收发器建立时间 */
+    while( R8_UART3_TFC < UART_FIFO_SIZE && tx_idx < tx_len )   /* 预填 FIFO(此窗口 tx_state=0) */
+        R8_UART3_THR = buf[ tx_idx ++ ];
+    if( tx_idx >= tx_len )                                      /* 短帧(≤8B): 预填即发完 */
     {
-        while( R8_UART3_TFC == UART_FIFO_SIZE ) ;               /* 发送 FIFO 满则等待 */
-        R8_UART3_THR = buf[ i ];                                /* 写入一字节 */
+        while( !( R8_UART3_LSR & RB_LSR_TX_ALL_EMP ) ) ;        /* 忙等最后字节移位完(≤1字节时间) */
+        GPIOA_ResetBits( GPIO_Pin_6 );                          /* 立即回接收方向, 不等下轮 poll */
+        return;
     }
-    while( !( R8_UART3_LSR & RB_LSR_TX_ALL_EMP ) ) ;            /* 等最后字节移位完(TXC 空) */
-    GPIOA_ResetBits( GPIO_Pin_6 );                              /* 拉低 DE 回接收方向 */
+    tx_state = 1;                                               /* 长帧: 置发送态, 剩余字节交 ISR */
+    UART3_INTCfg( ENABLE, RB_IER_THR_EMPTY );
 }
 
 /*******************************************************************************
@@ -286,19 +344,47 @@ void modbus_rtu_init( void )
 }
 
 /*******************************************************************************
-* 主循环调用: 检查帧完成标志, 置位则解析并应答。
-* 帧完成时 TMR1 ISR 已翻转半区, 新帧写入另一半区 —— 处理当前帧无需
-*   关中断, 数据与长度天然一致。应答发送为阻塞(最大 253B@9600≈264ms)。
+* main 上电记录复位原因(供 0x0082 读)。
+* 在 SYS_GetLastResetSta() 有效期内调用(复位标志在后续操作中可能被清除)。
+*******************************************************************************/
+void modbus_diag_set_reset_cause( UINT8 cause )
+{
+    g_reset_cause = cause;
+}
+
+/*******************************************************************************
+* main 主循环推送按键事件丢弃计数(供 0x0085 读)。
+* 丢键 = 键盘输入数据不完整, 主站可据此监控输入路径健康度。
+*******************************************************************************/
+void modbus_diag_set_key_drop( UINT16 cnt )
+{
+    g_key_drop = cnt;
+}
+
+/*******************************************************************************
+* 主循环调用(每 2ms 一次):
+*   1. TX 收尾安全网: DE 回落正常由 send_start(短帧)与 UART3 ISR(长帧)完成,
+*      此处仅兜底(如中断被更高优先级阻塞时), 保证任何情况不滞留发送态。
+*   2. 帧处理: 有完成帧且非发送中 → 解析并启动非阻塞应答。
+* 门控说明: 发送中(tx_state=1)不处理新帧 —— 新帧若在应答期间到达(半双工下
+*   仅可能为总线噪声/垃圾), 继续处理会覆盖 tbuf 破坏正在发送的应答;
+*   双缓冲接收保证等待期间新帧仍被完整接收, 收尾后立即处理。
 *******************************************************************************/
 void modbus_rtu_poll( void )
 {
     UINT16 n;
 
-    if( rx_frame_done )
+    if( tx_state && ( R8_UART3_LSR & RB_LSR_TX_ALL_EMP ) )
+    {
+        GPIOA_ResetBits( GPIO_Pin_6 );                          /* 拉低 DE 回接收方向 */
+        tx_state = 0;                                           /* 发送完成 */
+    }
+
+    if( rx_frame_done && !tx_state )
     {
         rx_frame_done = 0;                                      /* 先清标志, 允许 ISR 收新帧 */
         n = modbus_frame_process( rbuf[ rx_buf_sel ^ 1 ], rx_frame_len, tbuf ); /* 处理翻转前的半区 */
-        if( n > 0 ) uart3_send( tbuf, n );                      /* 仅地址+CRC 匹配才应答 */
+        if( n > 0 ) uart3_send_start( tbuf, n );                /* 仅地址+CRC 匹配才应答 */
     }
 }
 
@@ -312,8 +398,25 @@ void UART3_IRQHandler( void )
     while( R8_UART3_LSR & RB_LSR_DATA_RDY )
     {
         UINT8 b = R8_UART3_RBR;
-        if( rx_cnt < RX_BUF_SIZE ) rbuf[ rx_buf_sel ][ rx_cnt ++ ] = b;   /* 防溢出 */
+        if( rx_cnt < RX_BUF_SIZE )                              /* 防溢出 */
+        {
+            if( rx_cnt == 0 )                                   /* 首字节: 唤醒帧空闲计时(TIM1) */
+                TMR1_ITCfg( ENABLE, RB_TMR_IE_CYC_END );
+            rbuf[ rx_buf_sel ][ rx_cnt ++ ] = b;
+        }
         rx_idle_cnt = 0;                                        /* 有数据即重置空闲计时 */
+    }
+    if( tx_state )                                              /* TX 分支: FIFO 空时续填剩余字节 */
+    {
+        while( R8_UART3_TFC < UART_FIFO_SIZE && tx_idx < tx_len )
+            R8_UART3_THR = tx_buf[ tx_idx ++ ];
+        if( tx_idx >= tx_len )                                  /* 全部入 FIFO: 立即收尾回接收方向 */
+        {
+            UART3_INTCfg( DISABLE, RB_IER_THR_EMPTY );
+            while( !( R8_UART3_LSR & RB_LSR_TX_ALL_EMP ) ) ;    /* 等最后字节移位完(≤1字节时间) */
+            GPIOA_ResetBits( GPIO_Pin_6 );                      /* 拉低 DE 回接收方向 */
+            tx_state = 0;
+        }
     }
 }
 
@@ -321,6 +424,8 @@ void UART3_IRQHandler( void )
 * TIM1 100μs tick 中断: 空闲计数; 连续无字节达 3.5T 即判定一帧结束。
 *   帧结束时快照 rx_cnt 并翻转半区: 新帧字节写入另一半区,
 *   与 poll 正在处理的帧天然隔离, 无需拷贝也无需关中断。
+* 功耗优化: 总线空闲(rx_cnt==0)时关闭周期中断, 首字节由 UART3 ISR 唤醒 ——
+*   总线静默期 TIM1 不再空转(省 ~10k 中断/秒)。
 *******************************************************************************/
 void TMR1_IRQHandler( void )
 {
@@ -335,4 +440,6 @@ void TMR1_IRQHandler( void )
         rx_idle_cnt  = 0;
         rx_frame_done = 1;                                      /* 通知主循环处理 */
     }
+    if( rx_cnt == 0 )                                           /* 总线空闲: 停帧空闲计时中断 */
+        TMR1_ITCfg( DISABLE, RB_TMR_IE_CYC_END );
 }

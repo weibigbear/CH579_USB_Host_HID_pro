@@ -26,18 +26,21 @@ typedef struct
 static modbus_cfg_t g_cfg = { MODBUS_CFG_MAGIC, MODBUS_DEF_ADDR, MODBUS_DEF_BAUD, 0 };
 
 /*******************************************************************************
-* CRC16 Modbus (Poly 0xA001, 逐位运算) — 与 modbus_rtu.c 内实现一致
+* CRC16 Modbus (Poly 0xA001, 半字节查表) — 与 modbus_rtu.c 内实现一致
 *******************************************************************************/
+static const UINT16 cfg_crc_tab[ 16 ] = {
+    0x0000, 0xCC01, 0xD801, 0x1400, 0xF001, 0x3C00, 0x2800, 0xE401,
+    0xA001, 0x6C00, 0x7800, 0xB401, 0x5000, 0x9C01, 0x8801, 0x4400
+};
+
 static UINT16 cfg_crc16( const UINT8 *dataIn, UINT16 length )
 {
     UINT16 crc = 0xFFFF;
     UINT16 i;
-    UINT8  j;
     for( i = 0; i < length; i ++ )
     {
-        crc ^= dataIn[ i ];
-        for( j = 0; j < 8; j ++ )
-            crc = ( crc & 1 ) != 0 ? ( ( crc >> 1 ) ^ 0xA001 ) : ( crc >> 1 );
+        crc = ( crc >> 4 ) ^ cfg_crc_tab[ ( crc ^ dataIn[ i ] ) & 0x0F ];
+        crc = ( crc >> 4 ) ^ cfg_crc_tab[ ( crc ^ ( dataIn[ i ] >> 4 ) ) & 0x0F ];
     }
     return crc;
 }

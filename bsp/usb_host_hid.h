@@ -9,7 +9,10 @@
 *******************************************************************************/
 #define KEV_PRESS     0
 #define KEV_RELEASE   1
-#define KEY_EV_QUEUE_SIZE  16
+/* 事件队列深度: 最坏突发(6 键和弦 press+release + 修饰键变化)≈28 事件;
+   32 余量覆盖 Flash 保存等 ~20ms 主循环暂停窗口, 防止快速输入丢键
+   (丢键 = Modbus 寄存器数据错字, 本设备核心数据路径, 宁大勿小)。 */
+#define KEY_EV_QUEUE_SIZE  32
 
 typedef struct
 {

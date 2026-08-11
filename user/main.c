@@ -6,6 +6,7 @@
 #include "keymap.h"
 #include "ascii_frame.h"
 #include "modbus_rtu.h"
+#include "modbus_cfg.h"
 
 /*******************************************************************************
 * 消费: 弹空队列 → UART 打印
@@ -18,11 +19,11 @@ static void process_key_events( void )
         if( ev.ifidx == 1 )
         {
             const char *n = consumer_usage_name( ev.usage );
-            up_puts( "MEDIA: [1] " );
-            up_puts( ev.type == KEV_PRESS ? "DN " : "UP " );
-            if( n ) up_puts( n );
-            else { up_puts( "0x" ); up_puthex4( ev.usage ); }
-            up_puts( "\r\n" );
+            dbg_puts( "MEDIA: [1] " );
+            dbg_puts( ev.type == KEV_PRESS ? "DN " : "UP " );
+            if( n ) dbg_puts( n );
+            else { dbg_puts( "0x" ); dbg_puthex4( ev.usage ); }
+            dbg_puts( "\r\n" );
         }
         else
         {
@@ -52,13 +53,13 @@ static void process_key_events( void )
                 }
             }
 
-            up_puts( "KEY:  [0] " );
-            up_puts( ev.type == KEV_PRESS ? "DN " : "UP " );
-            up_puts( "\"" );
-            up_puts( key_display( ev.usage, ( ( ev.mods >> 1 ) | ( ev.mods >> 5 ) ) & 1 ) );
-            up_puts( "\" (mods=" );
-            up_puthex( ev.mods );
-            up_puts( ")\r\n" );
+            dbg_puts( "KEY:  [0] " );
+            dbg_puts( ev.type == KEV_PRESS ? "DN " : "UP " );
+            dbg_puts( "\"" );
+            dbg_puts( key_display( ev.usage, ( ( ev.mods >> 1 ) | ( ev.mods >> 5 ) ) & 1 ) );
+            dbg_puts( "\" (mods=" );
+            dbg_puthex( ev.mods );
+            dbg_puts( ")\r\n" );
         }
     }
 }
@@ -77,23 +78,31 @@ int main()
     ascii_frame_init();     /* 清零 Modbus 寄存器组缓冲(40001~40128) */
     modbus_rtu_init();      /* 初始化 UART3 + PA4/PA5/PA6(RS485) */
 
-/* S3: 复位原因诊断——上次是否为看门狗复位(WTR=0x02, 其余复位原因归为正常) */
+/* S3: 复位原因诊断——记录并打印(上次复位原因同时通过 Modbus 0x0082 可读) */
+    modbus_diag_set_reset_cause( SYS_GetLastResetSta() );
     if( SYS_GetLastResetSta() == RST_FLAG_WTR )
         up_puts( "WDOG reset\r\n" );
     else
         up_puts( "reset: normal\r\n" );
 
-/* S1: 使能看门狗, 溢出即复位(初值 250 → 32MHz 下约 1s 超时) */
-    WWDG_SetCounter( 250 );             /* 先重载计数再使能, 防计数恰为 0 的瞬时误复位 */
+/* S1: 使能看门狗, 溢出即复位(初值 12 → 32MHz 下约 1s 超时) */
+    WWDG_SetCounter( 12 );              /* 先重载计数再使能, 防计数恰为 0 的瞬时误复位 */
     WWDG_ResetCfg( ENABLE );
 
-    up_puts( "\r\nMK5 USB-HID Host start\r\n" );
+    dbg_puts( "\r\nMK5 USB-HID Host start\r\n" );
+
+/* 现场诊断: 打印当前 Modbus 地址/波特率(恒打印, 接线与配置排查第一手信息) */
+    up_puts( "mb: addr=" );
+    up_putdec( modbus_cfg_get_addr() );
+    up_puts( " baud=" );
+    up_putdec( modbus_baud_table[ modbus_cfg_get_baud() ] );
+    up_puts( "\r\n" );
 
     usb_hid_init();
 
     while(1)
     {
-        WWDG_SetCounter( 250 );     /* 每 2ms 心跳喂狗, 防饿狗(含 Modbus 阻塞后) */
+        WWDG_SetCounter( 12 );      /* 每 2ms 心跳喂狗, 防饿狗(含 Modbus 阻塞后) */
 
         usb_hid_poll();
 
@@ -105,6 +114,7 @@ int main()
 
         ascii_frame_poll();     /* 空闲超时自动提交帧(500ms 可调) */
         modbus_rtu_poll();      /* 轮询 UART3: 收帧/解析/应答 Modbus 主站 */
+        modbus_diag_set_key_drop( ( UINT16 )usb_hid_ev_drop() );  /* 按键丢弃计数 → 0x0085 */
 
 /* 串口命令: 'p' 打印状态 'd' 打印丢弃计数 'e' 清空队列(其余字符忽略) */
         if( R8_UART1_LSR & RB_LSR_DATA_RDY )
@@ -137,21 +147,21 @@ int main()
             }
         }
 
-/* 心跳: 每秒打印一次轮询统计 */
+/* 心跳: 每秒打印一次轮询统计(业务日志, 量产出货可裁剪) */
         {
             static UINT8 sec = 0;
             if( ++sec >= 250 )
             {
                 sec = 0;
-                up_puts( "H: poll=" );
-                up_putdec( usb_hid_diag_poll() );
-                up_puts( " ok=" );
-                up_putdec( usb_hid_diag_ok() );
-                up_puts( " nak=" );
-                up_putdec( usb_hid_diag_nak() );
-                up_puts( " err=" );
-                up_putdec( usb_hid_diag_err() );
-                up_puts( "\r\n" );
+                dbg_puts( "H: poll=" );
+                dbg_putdec( usb_hid_diag_poll() );
+                dbg_puts( " ok=" );
+                dbg_putdec( usb_hid_diag_ok() );
+                dbg_puts( " nak=" );
+                dbg_putdec( usb_hid_diag_nak() );
+                dbg_puts( " err=" );
+                dbg_putdec( usb_hid_diag_err() );
+                dbg_puts( "\r\n" );
                 usb_hid_diag_reset();
             }
         }

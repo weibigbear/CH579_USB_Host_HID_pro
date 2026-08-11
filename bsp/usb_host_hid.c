@@ -260,8 +260,8 @@ static void parse_consumer_report( UINT8 *buf, UINT8 len )
 static void dump_bytes( const UINT8 *p, UINT8 n )
 {
     UINT8 i;
-    for( i = 0; i < n; i ++ ) { up_puthex( p[ i ] ); up_puts( " " ); }
-    up_puts( "\r\n" );
+    for( i = 0; i < n; i ++ ) { dbg_puthex( p[ i ] ); dbg_puts( " " ); }
+    dbg_puts( "\r\n" );
 }
 
 /* 轮询两个 IN 端点; 按来源接口分发到对应解析器 */
@@ -280,7 +280,7 @@ static void PollHIDEndpoints( void )
         {
             if( s == ( USB_PID_NAK | ERR_USB_TRANSFER ) ) { diag_nak ++; continue; }
             diag_err ++;
-            if( s == ERR_USB_DISCON ) up_puts( "\r\ndev out\r\n" );
+            if( s == ERR_USB_DISCON ) dbg_puts( "\r\ndev out\r\n" );
             continue;
         }
 
@@ -313,63 +313,93 @@ void usb_hid_init( void )
     R8_USB_INT_EN = 0;
 }
 
+/*******************************************************************************
+* 枚举兜底保险(工业可靠性):
+*   InitRootDevice 失败后 DeviceStatus 停留在 ROOT_DEV_CONNECTED, 库不会自动重试;
+*   本层在失败后强制 DisableRootHubPort() 复位库状态并退避 ~500ms 重试,
+*   连续 ENUM_FAIL_MAX 次仍失败则软件复位自愈(清除可能卡死的 USB 控制器状态)。
+*   枚举期间看门狗被临时禁用(库单阶段有 200ms 超时, 窗口有界), 兜底保证
+*   任何情况下不会永久挂死。
+*******************************************************************************/
+#define ENUM_FAIL_MAX    5               /* 连续枚举失败上限, 达到即软件复位 */
+#define ENUM_RETRY_LOOPS 250             /* 失败后退避主循环次数(2ms/次≈500ms) */
+
 void usb_hid_poll( void )
 {
     UINT8  s;
     UINT8  rlen;
+    static UINT8  enum_fail_cnt = 0;     /* 连续枚举失败次数 */
+    static UINT16 enum_retry    = 0;     /* 失败后重试退避计数 */
 
     s = AnalyzeRootHub();
     if( s == ERR_USB_CONNECT )
     {
+        if( enum_retry > 0 ) { enum_retry --; return; }   /* 退避期不立即重试 */
+
         /* 枚举+HID 配置为阻塞流程, 耗时可能超过看门狗 1s 超时, 期间暂停防饿狗 */
         WWDG_ResetCfg( DISABLE );
-        up_puts( "dev in, enum...\n" );
+        dbg_puts( "dev in, enum...\n" );
         s = InitRootDevice();
-        up_printf( "InitRootDevice=%x\r\n", s );
+        dbg_printf( "InitRootDevice=%x\r\n", s );
         if( s == ERR_SUCCESS )
         {
             UINT8  kbd_ifnum;
+            enum_fail_cnt = 0;                          /* 成功即清零失败计数 */
             FindHID_IN_Endeps();
-            up_puts( "VID=" );
-            up_printf( "%x", ThisUsbDev.DeviceVID );
-            up_puts( " PID=" );
-            up_printf( "%x\r\n", ThisUsbDev.DevicePID );
-            up_puts( "ep0=" );
-            up_printf( "%x", ThisUsbDev.GpVar[ 0 ] );
-            up_puts( " ep1=" );
-            up_printf( "%x\r\n", ThisUsbDev.GpVar[ 1 ] );
+            dbg_puts( "VID=" );
+            dbg_printf( "%x", ThisUsbDev.DeviceVID );
+            dbg_puts( " PID=" );
+            dbg_printf( "%x\r\n", ThisUsbDev.DevicePID );
+            dbg_puts( "ep0=" );
+            dbg_printf( "%x", ThisUsbDev.GpVar[ 0 ] );
+            dbg_puts( " ep1=" );
+            dbg_printf( "%x\r\n", ThisUsbDev.GpVar[ 1 ] );
 
             /* 诊断: 枚举后的速度状态(0=低速 1=全速) */
-            up_puts( "spd=" );
-            up_printf( "%x", ThisUsbDev.DeviceSpeed );
-            up_puts( " UC_LS=" );
-            up_printf( "%x", ( R8_USB_CTRL & RB_UC_LOW_SPEED ) ? 1 : 0 );
-            up_puts( " UH_LS=" );
-            up_printf( "%x\r\n", ( R8_UHOST_CTRL & RB_UH_LOW_SPEED ) ? 1 : 0 );
+            dbg_puts( "spd=" );
+            dbg_printf( "%x", ThisUsbDev.DeviceSpeed );
+            dbg_puts( " UC_LS=" );
+            dbg_printf( "%x", ( R8_USB_CTRL & RB_UC_LOW_SPEED ) ? 1 : 0 );
+            dbg_puts( " UH_LS=" );
+            dbg_printf( "%x\r\n", ( R8_UHOST_CTRL & RB_UH_LOW_SPEED ) ? 1 : 0 );
 
             kbd_ifnum = ( ThisUsbDev.GpVar[ 2 ] == 0xFF ) ? 0 : ThisUsbDev.GpVar[ 2 ];
 
-            up_puts( "if0: " );
-            up_printf( "%x %x ",
+            dbg_puts( "if0: " );
+            dbg_printf( "%x %x ",
                 ( UINT8 )HID_SetIdle( kbd_ifnum, 0x0A ),
                 ( UINT8 )HID_SetProtocol( kbd_ifnum, 0 ) );
             s = HID_GetReportDescr( kbd_ifnum, &rlen );
-            up_printf( "%x\r\n", s );
-            if( s == ERR_SUCCESS ) { up_puts( "rep0: " ); dump_bytes( Com_Buffer, rlen ); }
+            dbg_printf( "%x\r\n", s );
+            if( s == ERR_SUCCESS ) { dbg_puts( "rep0: " ); dump_bytes( Com_Buffer, rlen ); }
 
             if( ThisUsbDev.GpVar[ 1 ] != 0 )
             {
-                up_puts( "if1: " );
-                up_printf( "%x %x ",
+                dbg_puts( "if1: " );
+                dbg_printf( "%x %x ",
                     ( UINT8 )HID_SetIdle( 1, 0x0A ),
                     ( UINT8 )HID_SetProtocol( 1, 0 ) );
                 s = HID_GetReportDescr( 1, &rlen );
-                up_printf( "%x\r\n", s );
-                if( s == ERR_SUCCESS ) { up_puts( "rep1: " ); dump_bytes( Com_Buffer, rlen ); }
+                dbg_printf( "%x\r\n", s );
+                if( s == ERR_SUCCESS ) { dbg_puts( "rep1: " ); dump_bytes( Com_Buffer, rlen ); }
             }
         }
+        else
+        {
+            /* 枚举失败: 计数并退避; 连续失败达上限 → 软件复位自愈 */
+            enum_fail_cnt ++;
+            if( enum_fail_cnt >= ENUM_FAIL_MAX )
+            {
+                up_puts( "enum fail, sys reset\r\n" );       /* 错误级, 恒打印 */
+                WWDG_SetCounter( 12 );
+                WWDG_ResetCfg( ENABLE );
+                NVIC_SystemReset();                          /* 自愈: 清 USB 状态后重启 */
+            }
+            enum_retry = ENUM_RETRY_LOOPS;                   /* ~500ms 后重试 */
+            DisableRootHubPort();                            /* 库状态复位, 使下次可重枚举 */
+        }
         /* 枚举完成, 恢复看门狗: 先重载计数再使能, 防计数恰为 0 的瞬时误复位 */
-        WWDG_SetCounter( 250 );
+        WWDG_SetCounter( 12 );
         WWDG_ResetCfg( ENABLE );
     }
 }
