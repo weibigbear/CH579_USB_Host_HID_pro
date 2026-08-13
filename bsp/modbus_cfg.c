@@ -20,10 +20,11 @@ typedef struct
     UINT32 magic;          /* MODBUS_CFG_MAGIC */
     UINT8  addr;           /* 从机地址 1~247 */
     UINT8  baud;           /* 波特率索引 0~4 */
-    UINT16 crc;            /* 结构校验(CRC16) */
-} modbus_cfg_t;            /* 共 8 字节, 4 字节对齐, 无填充 */
+    UINT16 idle_ms;        /* 空闲超时提交 ms(0=禁用), 默认 500 */
+    UINT16 crc;            /* 结构校验(CRC16, 前 8 字节参与) */
+} modbus_cfg_t;            /* 共 10 字节, 2 字节对齐, 无填充 */
 
-static modbus_cfg_t g_cfg = { MODBUS_CFG_MAGIC, MODBUS_DEF_ADDR, MODBUS_DEF_BAUD, 0 };
+static modbus_cfg_t g_cfg = { MODBUS_CFG_MAGIC, MODBUS_DEF_ADDR, MODBUS_DEF_BAUD, MODBUS_DEF_IDLE_MS, 0 };
 
 /*******************************************************************************
 * CRC16 Modbus (Poly 0xA001, 半字节查表) — 与 modbus_rtu.c 内实现一致
@@ -46,11 +47,11 @@ static UINT16 cfg_crc16( const UINT8 *dataIn, UINT16 length )
 }
 
 /*******************************************************************************
-* 刷新结构 CRC 字段(前 6 字节参与计算)
+* 刷新结构 CRC 字段(前 8 字节参与计算)
 *******************************************************************************/
 static void cfg_update_crc( void )
 {
-    g_cfg.crc = cfg_crc16( ( const UINT8 * )&g_cfg, 6 );
+    g_cfg.crc = cfg_crc16( ( const UINT8 * )&g_cfg, 8 );
 }
 
 /*******************************************************************************
@@ -61,17 +62,20 @@ void modbus_cfg_init( void )
 {
     const modbus_cfg_t *p = ( const modbus_cfg_t * )MODBUS_CFG_ADDR;
 
-    if( p->magic == MODBUS_CFG_MAGIC && p->crc == cfg_crc16( ( const UINT8 * )p, 6 ) )
+    if( p->magic == MODBUS_CFG_MAGIC && p->crc == cfg_crc16( ( const UINT8 * )p, 8 ) )
     {
-        g_cfg.magic = p->magic;
-        g_cfg.addr  = p->addr;
-        g_cfg.baud  = p->baud;
-        g_cfg.crc   = p->crc;
+        g_cfg.magic   = p->magic;
+        g_cfg.addr    = p->addr;
+        g_cfg.baud    = p->baud;
+        g_cfg.idle_ms = p->idle_ms;
+        g_cfg.crc     = p->crc;
         /* 防御: 加载值仍须在合法范围, 否则回退默认并回写 */
-        if( g_cfg.addr < 1 || g_cfg.addr > 247 || g_cfg.baud >= MODBUS_BAUD_NUM )
+        if( g_cfg.addr < 1 || g_cfg.addr > 247 || g_cfg.baud >= MODBUS_BAUD_NUM ||
+            g_cfg.idle_ms > 60000 )
         {
-            g_cfg.addr = MODBUS_DEF_ADDR;
-            g_cfg.baud = MODBUS_DEF_BAUD;
+            g_cfg.addr    = MODBUS_DEF_ADDR;
+            g_cfg.baud    = MODBUS_DEF_BAUD;
+            g_cfg.idle_ms = MODBUS_DEF_IDLE_MS;
             cfg_update_crc();
             modbus_cfg_save();
         }
@@ -97,6 +101,7 @@ UINT8 modbus_cfg_save( void )
 
 UINT8 modbus_cfg_get_addr( void ) { return g_cfg.addr; }
 UINT8 modbus_cfg_get_baud( void ) { return g_cfg.baud; }
+UINT16 modbus_cfg_get_idle( void ) { return g_cfg.idle_ms; }
 
 UINT8 modbus_cfg_set_addr( UINT8 a )
 {
@@ -110,6 +115,14 @@ UINT8 modbus_cfg_set_baud( UINT8 b )
 {
     if( b >= MODBUS_BAUD_NUM ) return 1;
     g_cfg.baud = b;
+    cfg_update_crc();
+    return 0;
+}
+
+UINT8 modbus_cfg_set_idle( UINT16 ms )
+{
+    if( ms > 60000 ) return 1;              /* 0=禁用自动提交, 合法 */
+    g_cfg.idle_ms = ms;
     cfg_update_crc();
     return 0;
 }

@@ -26,15 +26,19 @@
 #include "CH57x_common.h"
 
 #define ASCII_FRAME_SIZE   128          /* 寄存器组大小: 40001~40128 */
-#define ASCII_IDLE_MS      500          /* 空闲超时提交时间, 可调;
-                                          主循环每 2ms 调一次 poll(),
-                                          内部按 (500/2)=250 次心跳换算 */
+#define ASCII_IDLE_MS_DEF  500          /* 默认空闲超时提交时间(ms);
+                                           主循环每 2ms 调一次 poll(),
+                                           内部按 (ms/2) 次心跳换算;
+                                           0 = 禁用自动提交(仅 Enter 定帧)。
+                                           运行时可通过 ascii_frame_set_idle_ms()
+                                           修改(Modbus 0x0086 配置寄存器联动)。 */
 
 void ascii_frame_init( void );          /* 清零寄存器组与状态(fill: 上电后调用一次) */
 void ascii_frame_putch( char c );       /* 追加一个字符(满 128 忽略), 重置空闲计数 */
 void ascii_frame_backspace( void );     /* 删除上一个字符(回退并清零), 重置空闲计数 */
 void ascii_frame_commit( void );        /* 立即提交: 余段清零 + 复位 index */
 void ascii_frame_poll( void );          /* 主循环调用(约 2ms 一次): 空闲超时自动提交 */
+void ascii_frame_set_idle_ms( UINT16 ms ); /* 设置空闲超时(ms, 0=禁用); 立即生效 */
 UINT8 ascii_frame_get( UINT8 index );   /* 读寄存器低字节(index 0~127), 越界返回 0 */
 
 #endif /* __ASCII_FRAME_H */

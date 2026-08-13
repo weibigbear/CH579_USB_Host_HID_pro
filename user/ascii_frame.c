@@ -23,6 +23,16 @@
 static UINT8  reg_ascii[ ASCII_FRAME_SIZE ];
 static UINT8  frame_idx = 0;    /* 当前帧写入位置(=有效字符个数, 0~128) */
 static UINT16 idle_cnt  = 0;    /* 空闲心跳计数(主循环约 2ms 递增一次) */
+static UINT16 g_idle_ms = ASCII_IDLE_MS_DEF;  /* 空闲超时(ms), 0=禁用; Modbus 0x0086 联动 */
+
+/*******************************************************************************
+* 设置空闲超时(ms)。0 = 禁用自动提交(仅 Enter 定帧)。
+* 调用点: main 上电灌入 modbus_cfg 加载值; modbus_rtu 0x06 写 0x0086 后调用。
+*******************************************************************************/
+void ascii_frame_set_idle_ms( UINT16 ms )
+{
+    g_idle_ms = ms;
+}
 
 /*******************************************************************************
 * 初始化: 全组清零 + 光标复位, 清空空闲计时。
@@ -79,16 +89,22 @@ void ascii_frame_commit( void )
 
 /*******************************************************************************
 * 主循环心跳驱动: 空闲超时自动提交。
-* 每 2ms 被调一次。若 500ms(ASCII_IDLE_MS)内无任何写入/删除/提交动作,
-*   且当前帧非空(frame_idx > 0), 则自动 commit(), 防止只有缓冲没定帧
-*   导致 Modbus 一直读到不完整输入。
-* - 空帧(frame_idx == 0)时只重置计时返回: 避免无输入时每 500ms 无意义地
+* 每 2ms 被调一次。若 g_idle_ms 毫秒(约 g_idle_ms/2 次心跳)内无任何写入/删除/
+*   提交动作, 且当前帧非空(frame_idx > 0), 则自动 commit(), 防止只有缓冲没
+*   定帧导致 Modbus 一直读到不完整输入。
+* - 空帧(frame_idx == 0)时只重置计时返回: 避免无输入时每超时无意义地
 *   清空一次寄存器组(main 心跳打印等场景)。
+* - g_idle_ms == 0 时禁用自动提交(仅 Enter 定帧)。
 *******************************************************************************/
 void ascii_frame_poll( void )
 {
-    if( frame_idx == 0 ) { idle_cnt = 0; return; }   /* 空帧不提交 */
-    if( ++idle_cnt >= ( ASCII_IDLE_MS / 2 ) )        /* 500ms / 2ms 心跳 */
+    UINT16 limit;
+
+    if( g_idle_ms == 0 ) { idle_cnt = 0; return; }      /* 禁用自动提交 */
+    if( frame_idx == 0 ) { idle_cnt = 0; return; }      /* 空帧不提交 */
+    limit = ( UINT16 )( g_idle_ms >> 1 );               /* ms → 2ms 心跳数 */
+    if( limit == 0 ) limit = 1;
+    if( ++idle_cnt >= limit )
         ascii_frame_commit();
 }
 

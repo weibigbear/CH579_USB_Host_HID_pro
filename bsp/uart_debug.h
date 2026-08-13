@@ -4,8 +4,15 @@
 #include "CH57x_common.h"
 
 /*******************************************************************************
-* UART1 调试打印 (THR 轮询, 不依赖标准 printf/fputc 链接)
+* UART1 调试打印 (中断驱动非阻塞发送)
+*   putc1 快路径: FIFO 有空位直接写 THR(立即上线, 不依赖中断);
+*   FIFO 满时入环形缓冲, 由 UART1 TX 中断续填 —— 应用层永不等待。
+* 依赖: main 需在 UART1_DefInit() 后调用 uart_debug_init() 并
+*       NVIC_EnableIRQ( UART1_IRQn ); 主循环每轮调用 uart_debug_poll()
+*       兜底重武装中断(防御中断丢失)。
 *******************************************************************************/
+void uart_debug_init( void );               /* 复位发送缓冲(清残余) */
+void uart_debug_poll( void );               /* 主循环兜底: 缓冲非空且中断未开则重开 */
 void up_puts( const char *s );
 void up_puthex( UINT32 v );
 void up_putdec( UINT32 v );

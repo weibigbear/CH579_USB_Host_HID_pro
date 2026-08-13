@@ -152,6 +152,13 @@ static UINT16 modbus_cmd03_ack( const UINT8 *pRec, UINT8 *pAck )
             pAck[ AckLen ++ ] = ( UINT8 )g_key_drop;
             goto ack_done;
         }
+        else if( RegAddr == MODBUS_CFG_IDLE_REG )               /* 16 位: 高字节在前 */
+        {
+            UINT16 idle = modbus_cfg_get_idle();
+            pAck[ AckLen ++ ] = ( UINT8 )( idle >> 8 );
+            pAck[ AckLen ++ ] = ( UINT8 )idle;
+            goto ack_done;
+        }
         else return 0;                                          /* 未知地址→异常 0x02 */
         pAck[ AckLen ++ ] = 0x00;
         pAck[ AckLen ++ ] = val;
@@ -232,6 +239,18 @@ static UINT16 modbus_cmd06_ack( const UINT8 *pRec, UINT8 *pAck )
         g_baud = ( UINT8 )Value;
         UART3_BaudRateCfg( modbus_baud_table[ g_baud ] );       /* 立即生效 */
         g_idle_thresh = idle_thresh_tab[ g_baud ];              /* 帧边界阈值联动 */
+    }
+    else if( RegAddr == MODBUS_CFG_IDLE_REG )
+    {
+        if( Value > 60000 ) return 0;                           /* 非法数据值→0x03(0=禁用合法) */
+        if( Value != modbus_cfg_get_idle() )                    /* 值未变: 跳过擦写 */
+        {
+            st = modbus_cfg_set_idle( Value );
+            if( st != 0 ) return 0;
+            if( modbus_cfg_save() != 0 )
+                up_puts( "cfg save fail\r\n" );                 /* 保存失败仅警告 */
+        }
+        ascii_frame_set_idle_ms( Value );                       /* 立即生效 */
     }
     else
     {

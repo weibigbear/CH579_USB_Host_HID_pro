@@ -169,6 +169,48 @@ static UINT8 HID_GetReportDescr( UINT8 infc, UINT8 *retlen )
 *******************************************************************************/
 static const UINT8 mod_usage[ 8 ] = { 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7 };
 
+/*******************************************************************************
+* 按住自动连发(key repeat, 仅可打印字符, 类似 PC 键盘):
+*   键盘报告是"状态快照", 按住不动时无 diff → 只产生一次 PRESS。
+*   本状态机在按住超 DELAY 后每 INTERVAL 轮合成一条 PRESS 入事件队列,
+*   使 Modbus 寄存器/日志持续收到重复字符。
+*   刻意排除 Enter/Backspace/CapsLock/修饰键:
+*     - Enter 重复 = 帧反复提交清空(工业数据输入是灾难)
+*     - Backspace 重复 = 误触长按删光整帧
+* 计时位置在 PollHIDEndpoints(每轮主循环必调, 无论键盘 NAK 与否):
+*   键盘 idle(40ms)期间不上报, 若计时依赖报告会停摆。
+* 简化语义: 只重复最后按下的可打印键, 松开即停(不恢复前一个按住键)。
+*******************************************************************************/
+#define KBD_REPEAT_DELAY_CNT    200     /* 按住 ≈500ms 后开始重复(≈2.4ms/轮) */
+#define KBD_REPEAT_INTERVAL_CNT 20      /* 重复间隔 ≈50ms(~20 字符/秒) */
+
+static UINT16 repeat_usage = 0;         /* 当前可重复的键(0=无) */
+static UINT16 repeat_held  = 0;         /* 已按住轮数(超过 DELAY 才重复) */
+static UINT16 repeat_tick  = 0;         /* 距上次重复轮数 */
+static UINT8  g_kbd_mods   = 0;         /* 最近报告修饰键(合成 PRESS 用) */
+
+/* 可打印字符键判定: A-Z/0-9/标点/空格/小键盘数字符号;
+   排除 Enter(0x28)/Esc/Backspace(0x2A)/Tab/CapsLock(0x39)/小键盘Enter(0x58)/修饰键 */
+static UINT8 is_repeatable_usage( UINT16 u )
+{
+    return ( u >= 0x04 && u <= 0x27 ) ||          /* A-Z, 0-9 */
+           ( u >= 0x2C && u <= 0x38 ) ||          /* Space, 标点 */
+           ( u >= 0x54 && u <= 0x57 ) ||          /* 小键盘 / * - + */
+           ( u >= 0x59 && u <= 0x63 );            /* 小键盘数字/小数点 */
+}
+
+/* 每轮轮询推进 repeat 状态(无键盘数据时也调用) */
+static void kbd_repeat_poll( void )
+{
+    if( repeat_usage == 0 ) return;
+    repeat_held ++;
+    if( repeat_held < KBD_REPEAT_DELAY_CNT ) return;
+    repeat_tick ++;
+    if( repeat_tick < KBD_REPEAT_INTERVAL_CNT ) return;
+    repeat_tick = 0;
+    kbd_ev_push( KEV_PRESS, g_kbd_mods, 0, ( UINT8 )repeat_usage );  /* 合成重复按下 */
+}
+
 /* 修饰键位变化 → 按下/释放事件 */
 static void emit_mod_events( UINT8 old_m, UINT8 new_m )
 {
@@ -189,6 +231,7 @@ static void parse_kbd_report( UINT8 *buf, UINT8 len )
 
     if( len < 3 ) return;
     mods = buf[ 0 ];
+    g_kbd_mods = mods;
     emit_mod_events( last_mods, mods );
 
     /* 释放: 上次有而本次无 */
@@ -199,7 +242,10 @@ static void parse_kbd_report( UINT8 *buf, UINT8 len )
         for( j = 2; j < len; j ++ )
             if( buf[ j ] == last_keys[ i ] ) { found = 1; break; }
         if( !found )
+        {
             kbd_ev_push( KEV_RELEASE, last_mods, 0, last_keys[ i ] );
+            if( last_keys[ i ] == repeat_usage ) repeat_usage = 0;   /* 松开: 停止重复 */
+        }
     }
     /* 按下: 本次有而上次无 */
     for( j = 2; j < len; j ++ )
@@ -209,7 +255,15 @@ static void parse_kbd_report( UINT8 *buf, UINT8 len )
         for( i = 0; i < 6; i ++ )
             if( last_keys[ i ] == buf[ j ] ) { found = 1; break; }
         if( !found )
+        {
             kbd_ev_push( KEV_PRESS, mods, 0, buf[ j ] );
+            if( is_repeatable_usage( buf[ j ] ) )   /* 登记最后按下的可打印键 */
+            {
+                repeat_usage = buf[ j ];
+                repeat_held = 0;                    /* 重新计时(按下重来) */
+                repeat_tick = 0;
+            }
+        }
     }
     /* 更新快照 */
     for( i = 0; i < 6; i ++ ) last_keys[ i ] = 0;
@@ -275,7 +329,10 @@ static void PollHIDEndpoints( void )
         if( ep == 0 ) continue;
 
         diag_poll ++;
-        s = USBHostTransact( ( USB_PID_IN << 4 ) | ep, RB_UH_R_AUTO_TOG, 50 );
+        /* timeout=0: 键盘 NAK 时立即返回(库: timeout==0 时 NAK 直接返回),
+           不再忙等 1ms/端点 —— 空闲轮询周期从 ~2ms 降到 ~0, 主循环不再被
+           USB 轮询拖住, 快速敲键时键盘报告不易丢失(报告间隔 8~10ms)。 */
+        s = USBHostTransact( ( USB_PID_IN << 4 ) | ep, RB_UH_R_AUTO_TOG, 0 );
         if( s != ERR_SUCCESS )
         {
             if( s == ( USB_PID_NAK | ERR_USB_TRANSFER ) ) { diag_nak ++; continue; }
@@ -290,6 +347,7 @@ static void PollHIDEndpoints( void )
         if( i == 0 ) parse_kbd_report( RxBuffer, len );
         else         parse_consumer_report( RxBuffer, len );
     }
+    kbd_repeat_poll();   /* 每轮推进按住连发计时(无论本轮是否有键盘数据) */
 }
 
 /*******************************************************************************
