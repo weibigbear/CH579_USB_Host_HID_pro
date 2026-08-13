@@ -21,7 +21,7 @@
 
 #define MODBUS_DEF_ADDR     1               /* 默认从机地址 */
 #define MODBUS_DEF_BAUD     0               /* 默认波特率索引(0=9600) */
-#define MODBUS_DEF_IDLE_MS  500             /* 默认空闲超时提交(ms), 0=禁用自动提交 */
+#define MODBUS_DEF_IDLE_MS  1000            /* 默认空闲超时提交(ms), 0=禁用自动提交 */
 
 extern const UINT32 modbus_baud_table[ MODBUS_BAUD_NUM ];
 

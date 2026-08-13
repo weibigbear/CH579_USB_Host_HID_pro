@@ -181,12 +181,24 @@ static const UINT8 mod_usage[ 8 ] = { 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 
 *   键盘 idle(40ms)期间不上报, 若计时依赖报告会停摆。
 * 简化语义: 只重复最后按下的可打印键, 松开即停(不恢复前一个按住键)。
 *******************************************************************************/
-#define KBD_REPEAT_DELAY_CNT    200     /* 按住 ≈500ms 后开始重复(≈2.4ms/轮) */
+#define KBD_REPEAT_DELAY_CNT    320     /* 按住 ≈800ms 后开始重复(≈2.4ms/轮) */
 #define KBD_REPEAT_INTERVAL_CNT 20      /* 重复间隔 ≈50ms(~20 字符/秒) */
+#define KBD_REPEAT_MAX_CNT      20      /* 单次按住最多合成 20 次(~1 秒)强制停 */
+#define KBD_REPEAT_CONFIRM_CNT  60      /* "确认按住"有效期(≈144ms): 连续 N 轮未见
+                                           该键在报告中视为已松开, 强制停。
+                                           必须 << 延迟(320), 保证松开后远早于
+                                           开始合成即停 —— 根治部分键盘松开后
+                                           不上报空报告导致 RELEASE/快照校验
+                                           永不执行(历史缺陷 2026-08-13);
+                                           键盘按住期间每 8~40ms 上报, 远小于
+                                           60 轮, 真实长按不受影响。 */
 
 static UINT16 repeat_usage = 0;         /* 当前可重复的键(0=无) */
 static UINT16 repeat_held  = 0;         /* 已按住轮数(超过 DELAY 才重复) */
 static UINT16 repeat_tick  = 0;         /* 距上次重复轮数 */
+static UINT16 repeat_cnt  = 0;          /* 本次按住已合成次数(达 MAX 强制停) */
+static UINT16 repeat_round = 0;         /* 轮询轮数(仅 repeat 激活时递增) */
+static UINT16 repeat_last_seen = 0;     /* 最近一次确认该键仍在报告的轮数 */
 static UINT8  g_kbd_mods   = 0;         /* 最近报告修饰键(合成 PRESS 用) */
 
 /* 可打印字符键判定: A-Z/0-9/标点/空格/小键盘数字符号;
@@ -203,11 +215,26 @@ static UINT8 is_repeatable_usage( UINT16 u )
 static void kbd_repeat_poll( void )
 {
     if( repeat_usage == 0 ) return;
+    repeat_round ++;
+    /* 确认超时自停: 若连续 CONFIRM 轮未见该键在报告中(键盘松开后不上报
+       空报告/报告丢失), 视为已松开, 强制停止 —— 不依赖 RELEASE diff 与
+       快照校验(它们都需要"拿到报告"才执行, 键盘 NAK 时永不运行)。
+       阈值 << 延迟: 松开后远早于开始合成即停, 单点不会误连发。 */
+    if( ( UINT16 )( repeat_round - repeat_last_seen ) > KBD_REPEAT_CONFIRM_CNT )
+    {
+        repeat_usage = 0;
+        return;
+    }
     repeat_held ++;
     if( repeat_held < KBD_REPEAT_DELAY_CNT ) return;
     repeat_tick ++;
     if( repeat_tick < KBD_REPEAT_INTERVAL_CNT ) return;
     repeat_tick = 0;
+    if( ++repeat_cnt >= KBD_REPEAT_MAX_CNT )        /* 合成次数上限: 强制停止 */
+    {
+        repeat_usage = 0;
+        return;
+    }
     kbd_ev_push( KEV_PRESS, g_kbd_mods, 0, ( UINT8 )repeat_usage );  /* 合成重复按下 */
 }
 
@@ -229,7 +256,7 @@ static void parse_kbd_report( UINT8 *buf, UINT8 len )
     static UINT8 last_mods = 0;
     UINT8  i, j, mods, found;
 
-    if( len < 3 ) return;
+    if( len < 3 ) { repeat_usage = 0; return; }     /* 无按键数据 → 不可能有按住键 */
     mods = buf[ 0 ];
     g_kbd_mods = mods;
     emit_mod_events( last_mods, mods );
@@ -262,8 +289,22 @@ static void parse_kbd_report( UINT8 *buf, UINT8 len )
                 repeat_usage = buf[ j ];
                 repeat_held = 0;                    /* 重新计时(按下重来) */
                 repeat_tick = 0;
+                repeat_cnt  = 0;                    /* 合成计数复位 */
+                repeat_round = 0;                   /* 轮数重新起算 */
+                repeat_last_seen = 0;               /* 本次按下即为最近确认 */
             }
         }
+    }
+    /* 快照校验(双保险, 防 RELEASE 报告丢失导致的幽灵连发):
+       目标键不在当前报告 → 已松开, 停止重复;
+       在 → 更新"最近确认按住"轮数, 供 kbd_repeat_poll 超时自停。 */
+    if( repeat_usage != 0 )
+    {
+        found = 0;
+        for( j = 2; j < len; j ++ )
+            if( buf[ j ] == ( UINT8 )repeat_usage ) { found = 1; break; }
+        if( !found ) repeat_usage = 0;
+        else         repeat_last_seen = repeat_round;   /* 确认仍按住 */
     }
     /* 更新快照 */
     for( i = 0; i < 6; i ++ ) last_keys[ i ] = 0;

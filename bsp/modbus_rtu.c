@@ -159,6 +159,20 @@ static UINT16 modbus_cmd03_ack( const UINT8 *pRec, UINT8 *pAck )
             pAck[ AckLen ++ ] = ( UINT8 )idle;
             goto ack_done;
         }
+        else if( RegAddr == MODBUS_STAT_PENDLEN_REG )           /* 16 位: 高字节在前 */
+        {
+            UINT16 plen = ascii_frame_get_pending_len();        /* 待读帧长度(定帧后>0, 新输入=0) */
+            pAck[ AckLen ++ ] = ( UINT8 )( plen >> 8 );
+            pAck[ AckLen ++ ] = ( UINT8 )plen;
+            goto ack_done;
+        }
+        else if( RegAddr == MODBUS_STAT_FRAMENO_REG )           /* 16 位: 高字节在前 */
+        {
+            UINT16 fno = ascii_frame_get_frame_no();            /* 帧号(定帧+1, 变化=新帧) */
+            pAck[ AckLen ++ ] = ( UINT8 )( fno >> 8 );
+            pAck[ AckLen ++ ] = ( UINT8 )fno;
+            goto ack_done;
+        }
         else return 0;                                          /* 未知地址→异常 0x02 */
         pAck[ AckLen ++ ] = 0x00;
         pAck[ AckLen ++ ] = val;
@@ -174,6 +188,7 @@ static UINT16 modbus_cmd03_ack( const UINT8 *pRec, UINT8 *pAck )
         pAck[ AckLen ++ ] = 0x00;                               /* 高字节 */
         pAck[ AckLen ++ ] = ascii_frame_get( ( UINT8 )( RegAddr + i ) );  /* 低字节 ASCII */
     }
+    /* 不清空(覆盖式写入): 主站按 0x0088 长度 + 0x0089 帧号读取有效帧 */
 
 ack_done:
     /* 追加 CRC(低字节在前) */

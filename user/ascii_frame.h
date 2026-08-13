@@ -26,7 +26,7 @@
 #include "CH57x_common.h"
 
 #define ASCII_FRAME_SIZE   128          /* 寄存器组大小: 40001~40128 */
-#define ASCII_IDLE_MS_DEF  500          /* 默认空闲超时提交时间(ms);
+#define ASCII_IDLE_MS_DEF  1000         /* 默认空闲超时提交时间(ms);
                                            主循环每 2ms 调一次 poll(),
                                            内部按 (ms/2) 次心跳换算;
                                            0 = 禁用自动提交(仅 Enter 定帧)。
@@ -36,8 +36,10 @@
 void ascii_frame_init( void );          /* 清零寄存器组与状态(fill: 上电后调用一次) */
 void ascii_frame_putch( char c );       /* 追加一个字符(满 128 忽略), 重置空闲计数 */
 void ascii_frame_backspace( void );     /* 删除上一个字符(回退并清零), 重置空闲计数 */
-void ascii_frame_commit( void );        /* 立即提交: 余段清零 + 复位 index */
+void ascii_frame_commit( void );        /* 立即提交: 余段清零 + 复位 index + 记录长度 + 帧号+1 */
 void ascii_frame_poll( void );          /* 主循环调用(约 2ms 一次): 空闲超时自动提交 */
+UINT16 ascii_frame_get_pending_len( void ); /* 待读帧长度(定帧后=帧长, 新输入开始=0) */
+UINT16 ascii_frame_get_frame_no( void );    /* 帧号(每次定帧+1, 主站比对变化判断新帧) */
 void ascii_frame_set_idle_ms( UINT16 ms ); /* 设置空闲超时(ms, 0=禁用); 立即生效 */
 UINT8 ascii_frame_get( UINT8 index );   /* 读寄存器低字节(index 0~127), 越界返回 0 */
 
