@@ -115,14 +115,16 @@ static void FindHID_IN_Endeps( void )
     }
 }
 
-/* 发送 HID SET_IDLE 到键盘接口, 通知设备上报节奏(×4ms, 0=仅变化时上报) */
+/* 发送 HID SET_IDLE 到键盘接口, 通知设备周期上报节奏(时长×4ms, 0=仅变化时上报)
+   wValue = (duration<<8) | reportID: 高字节=时长, 低字节=reportID(0=全部报告) */
 static UINT8 HID_SetIdle( UINT8 infc, UINT8 period )
 {
     UINT8 s;
     UINT8 setidle[ 8 ];
-    /* bmRequestType=0x21(接口类,OUT) bRequest=HID_SET_IDLE(0x0A) wValue=period<<8 */
+    /* bmRequestType=0x21(接口类,OUT) bRequest=HID_SET_IDLE(0x0A)
+       byte[2]=wValue低(reportID=0) byte[3]=wValue高(duration=period) */
     setidle[ 0 ] = 0x21; setidle[ 1 ] = HID_SET_IDLE;
-    setidle[ 2 ] = period; setidle[ 3 ] = 0x00;
+    setidle[ 2 ] = 0x00; setidle[ 3 ] = period;
     setidle[ 4 ] = 0x00; setidle[ 5 ] = 0x00;
     setidle[ 6 ] = 0x00; setidle[ 7 ] = 0x00;
     CopySetupReqPkg( (PCHAR)setidle );
@@ -170,61 +172,16 @@ static UINT8 HID_GetReportDescr( UINT8 infc, UINT8 *retlen )
 static const UINT8 mod_usage[ 8 ] = { 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7 };
 
 /*******************************************************************************
-* 按住自动连发(key repeat, 仅可打印字符, 类似 PC 键盘):
-*   键盘报告是"状态快照", 按住不动时无 diff → 只产生一次 PRESS。
-*   本状态机在按住超 DELAY 后每 INTERVAL 轮合成一条 PRESS 入事件队列,
-*   使 Modbus 寄存器/日志持续收到重复字符。
-*   刻意排除 Enter/Backspace/CapsLock/修饰键:
-*     - Enter 重复 = 帧反复提交清空(工业数据输入是灾难)
-*     - Backspace 重复 = 误触长按删光整帧
-* 计时位置在 PollHIDEndpoints(每轮主循环必调, 无论键盘 NAK 与否):
-*   键盘 idle(40ms)期间不上报, 若计时依赖报告会停摆。
-* 简化语义: 只重复最后按下的可打印键, 松开即停(不恢复前一个按住键)。
-* 防幽灵连发(三重保险, 无需"确认超时"):
-*   1) RELEASE 报告 → 目标键不在报告, 停;
-*   2) 快照校验 → 收到报告但目标键不在其中, 停;
-*   3) 合成次数上限 MAX_CNT → 键盘松开后不上报空报告(RELEASE/快照校验
-*      永不执行)时, 最多多合成 20 次(~1 秒)强制停。
-*   说明: 曾用"确认超时"(连续 N 轮未见该键视为松开)防幽灵, 但部分键盘
-*   按住时仅在按下瞬间上报一次、之后 NAK, 导致长按被 144ms 超时误杀
-*   (repeat_held 未到 DELAY 即清零) → 长按完全失效(2026-08-15)。故删除。
+* 按住自动连发(key repeat)已禁用(2026-08-15):
+*   键盘固件仅在"按下"时上报一次报告, 松开/保持期间不上报任何数据
+*   (无空报告、无周期上报, 修复 SET_IDLE 字节序后依旧如此, 已实测确认)。
+*   因此固件无法知道键是否已松开 → 点按与长按在报告层面不可区分,
+*   任何固定延时连发都会让"点按后停顿>800ms"误发一串字符。
+*   权衡后禁用连发: 每次按键绝对只输出 1 个字符, 工业输入最可靠。
+* 曾尝试(已回退):
+*   - "确认超时"(连续 N 轮未见该键视为松开): 按住时不上报 → 长按被误杀
+*   - 固定时长冷却/释放门: 松开后无报告, 门禁无触发源, 无效
 *******************************************************************************/
-#define KBD_REPEAT_DELAY_CNT    320     /* 按住 ≈800ms 后开始重复(≈2.4ms/轮) */
-#define KBD_REPEAT_INTERVAL_CNT 20      /* 重复间隔 ≈50ms(~20 字符/秒) */
-#define KBD_REPEAT_MAX_CNT      20      /* 单次按住最多合成 20 次(~1 秒)强制停 */
-
-static UINT16 repeat_usage = 0;         /* 当前可重复的键(0=无) */
-static UINT16 repeat_held  = 0;         /* 已按住轮数(超过 DELAY 才重复) */
-static UINT16 repeat_tick  = 0;         /* 距上次重复轮数 */
-static UINT16 repeat_cnt  = 0;          /* 本次按住已合成次数(达 MAX 强制停) */
-static UINT8  g_kbd_mods   = 0;         /* 最近报告修饰键(合成 PRESS 用) */
-
-/* 可打印字符键判定: A-Z/0-9/标点/空格/小键盘数字符号;
-   排除 Enter(0x28)/Esc/Backspace(0x2A)/Tab/CapsLock(0x39)/小键盘Enter(0x58)/修饰键 */
-static UINT8 is_repeatable_usage( UINT16 u )
-{
-    return ( u >= 0x04 && u <= 0x27 ) ||          /* A-Z, 0-9 */
-           ( u >= 0x2C && u <= 0x38 ) ||          /* Space, 标点 */
-           ( u >= 0x54 && u <= 0x57 ) ||          /* 小键盘 / * - + */
-           ( u >= 0x59 && u <= 0x63 );            /* 小键盘数字/小数点 */
-}
-
-/* 每轮轮询推进 repeat 状态(无键盘数据时也调用) */
-static void kbd_repeat_poll( void )
-{
-    if( repeat_usage == 0 ) return;
-    repeat_held ++;
-    if( repeat_held < KBD_REPEAT_DELAY_CNT ) return;
-    repeat_tick ++;
-    if( repeat_tick < KBD_REPEAT_INTERVAL_CNT ) return;
-    repeat_tick = 0;
-    if( ++repeat_cnt >= KBD_REPEAT_MAX_CNT )        /* 合成次数上限: 强制停止 */
-    {
-        repeat_usage = 0;
-        return;
-    }
-    kbd_ev_push( KEV_PRESS, g_kbd_mods, 0, ( UINT8 )repeat_usage );  /* 合成重复按下 */
-}
 
 /* 修饰键位变化 → 按下/释放事件 */
 static void emit_mod_events( UINT8 old_m, UINT8 new_m )
@@ -244,9 +201,8 @@ static void parse_kbd_report( UINT8 *buf, UINT8 len )
     static UINT8 last_mods = 0;
     UINT8  i, j, mods, found;
 
-    if( len < 3 ) { repeat_usage = 0; return; }     /* 无按键数据 → 不可能有按住键 */
+    if( len < 3 ) return;
     mods = buf[ 0 ];
-    g_kbd_mods = mods;
     emit_mod_events( last_mods, mods );
 
     /* 释放: 上次有而本次无 */
@@ -257,10 +213,7 @@ static void parse_kbd_report( UINT8 *buf, UINT8 len )
         for( j = 2; j < len; j ++ )
             if( buf[ j ] == last_keys[ i ] ) { found = 1; break; }
         if( !found )
-        {
             kbd_ev_push( KEV_RELEASE, last_mods, 0, last_keys[ i ] );
-            if( last_keys[ i ] == repeat_usage ) repeat_usage = 0;   /* 松开: 停止重复 */
-        }
     }
     /* 按下: 本次有而上次无 */
     for( j = 2; j < len; j ++ )
@@ -270,25 +223,7 @@ static void parse_kbd_report( UINT8 *buf, UINT8 len )
         for( i = 0; i < 6; i ++ )
             if( last_keys[ i ] == buf[ j ] ) { found = 1; break; }
         if( !found )
-        {
             kbd_ev_push( KEV_PRESS, mods, 0, buf[ j ] );
-            if( is_repeatable_usage( buf[ j ] ) )   /* 登记最后按下的可打印键 */
-            {
-                repeat_usage = buf[ j ];
-                repeat_held = 0;                    /* 重新计时(按下重来) */
-                repeat_tick = 0;
-                repeat_cnt  = 0;                    /* 合成计数复位 */
-            }
-        }
-    }
-    /* 快照校验(保险2, 防 RELEASE 报告丢失导致的幽灵连发):
-       目标键不在当前报告 → 已松开, 停止重复。 */
-    if( repeat_usage != 0 )
-    {
-        found = 0;
-        for( j = 2; j < len; j ++ )
-            if( buf[ j ] == ( UINT8 )repeat_usage ) { found = 1; break; }
-        if( !found ) repeat_usage = 0;
     }
     /* 更新快照 */
     for( i = 0; i < 6; i ++ ) last_keys[ i ] = 0;
@@ -364,7 +299,6 @@ static void PollHIDEndpoints( void )
         if( i == 0 ) parse_kbd_report( RxBuffer, len );
         else         parse_consumer_report( RxBuffer, len );
     }
-    kbd_repeat_poll();   /* 每轮推进按住连发计时(无论本轮是否有键盘数据) */
 }
 
 /*******************************************************************************
