@@ -352,13 +352,6 @@ static void parse_consumer_report( UINT8 *buf, UINT8 len )
     last_n = n;
 }
 
-static void dump_bytes( const UINT8 *p, UINT8 n )
-{
-    UINT8 i;
-    for( i = 0; i < n; i ++ ) { dbg_puthex( p[ i ] ); dbg_puts( " " ); }
-    dbg_puts( "\r\n" );
-}
-
 /* 轮询两个 IN 端点; 按来源接口分发到对应解析器 */
 static void PollHIDEndpoints( void )
 {
@@ -378,7 +371,6 @@ static void PollHIDEndpoints( void )
         {
             if( s == ( USB_PID_NAK | ERR_USB_TRANSFER ) ) { diag_nak ++; continue; }
             diag_err ++;
-            if( s == ERR_USB_DISCON ) dbg_puts( "\r\ndev out\r\n" );
             continue;
         }
 
@@ -437,50 +429,24 @@ void usb_hid_poll( void )
 
         /* 枚举+HID 配置为阻塞流程, 耗时可能超过看门狗 1s 超时, 期间暂停防饿狗 */
         WWDG_ResetCfg( DISABLE );
-        dbg_puts( "dev in, enum...\n" );
         s = InitRootDevice();
-        dbg_printf( "InitRootDevice=%x\r\n", s );
         if( s == ERR_SUCCESS )
         {
             UINT8  kbd_ifnum;
             enum_fail_cnt = 0;                          /* 成功即清零失败计数 */
             FindHID_IN_Endeps();
-            dbg_puts( "VID=" );
-            dbg_printf( "%x", ThisUsbDev.DeviceVID );
-            dbg_puts( " PID=" );
-            dbg_printf( "%x\r\n", ThisUsbDev.DevicePID );
-            dbg_puts( "ep0=" );
-            dbg_printf( "%x", ThisUsbDev.GpVar[ 0 ] );
-            dbg_puts( " ep1=" );
-            dbg_printf( "%x\r\n", ThisUsbDev.GpVar[ 1 ] );
-
-            /* 诊断: 枚举后的速度状态(0=低速 1=全速) */
-            dbg_puts( "spd=" );
-            dbg_printf( "%x", ThisUsbDev.DeviceSpeed );
-            dbg_puts( " UC_LS=" );
-            dbg_printf( "%x", ( R8_USB_CTRL & RB_UC_LOW_SPEED ) ? 1 : 0 );
-            dbg_puts( " UH_LS=" );
-            dbg_printf( "%x\r\n", ( R8_UHOST_CTRL & RB_UH_LOW_SPEED ) ? 1 : 0 );
 
             kbd_ifnum = ( ThisUsbDev.GpVar[ 2 ] == 0xFF ) ? 0 : ThisUsbDev.GpVar[ 2 ];
 
-            dbg_puts( "if0: " );
-            dbg_printf( "%x %x ",
-                ( UINT8 )HID_SetIdle( kbd_ifnum, 0x0A ),
-                ( UINT8 )HID_SetProtocol( kbd_ifnum, 0 ) );
+            ( void )HID_SetIdle( kbd_ifnum, 0x0A );
+            ( void )HID_SetProtocol( kbd_ifnum, 0 );
             s = HID_GetReportDescr( kbd_ifnum, &rlen );
-            dbg_printf( "%x\r\n", s );
-            if( s == ERR_SUCCESS ) { dbg_puts( "rep0: " ); dump_bytes( Com_Buffer, rlen ); }
 
             if( ThisUsbDev.GpVar[ 1 ] != 0 )
             {
-                dbg_puts( "if1: " );
-                dbg_printf( "%x %x ",
-                    ( UINT8 )HID_SetIdle( 1, 0x0A ),
-                    ( UINT8 )HID_SetProtocol( 1, 0 ) );
+                ( void )HID_SetIdle( 1, 0x0A );
+                ( void )HID_SetProtocol( 1, 0 );
                 s = HID_GetReportDescr( 1, &rlen );
-                dbg_printf( "%x\r\n", s );
-                if( s == ERR_SUCCESS ) { dbg_puts( "rep1: " ); dump_bytes( Com_Buffer, rlen ); }
             }
         }
         else

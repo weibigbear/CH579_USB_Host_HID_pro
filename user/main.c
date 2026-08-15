@@ -140,25 +140,12 @@ int main()
     ascii_frame_set_idle_ms( modbus_cfg_get_idle() );   /* 空闲超时加载配置(0x0086, 0=禁用) */
     modbus_rtu_init();      /* 初始化 UART3 + PA4/PA5/PA6(RS485) */
 
-/* S3: 复位原因诊断——记录并打印(上次复位原因同时通过 Modbus 0x0082 可读) */
+/* S3: 复位原因诊断——记录(上次复位原因通过 Modbus 0x0082 可读) */
     modbus_diag_set_reset_cause( SYS_GetLastResetSta() );
-    if( SYS_GetLastResetSta() == RST_FLAG_WTR )
-        up_puts( "WDOG reset\r\n" );
-    else
-        up_puts( "reset: normal\r\n" );
 
 /* S1: 使能看门狗, 溢出即复位(初值 12 → 32MHz 下约 1s 超时) */
     WWDG_SetCounter( 12 );              /* 先重载计数再使能, 防计数恰为 0 的瞬时误复位 */
     WWDG_ResetCfg( ENABLE );
-
-    dbg_puts( "\r\nMK5 USB-HID Host start\r\n" );
-
-/* 现场诊断: 打印当前 Modbus 地址/波特率(恒打印, 接线与配置排查第一手信息) */
-    up_puts( "mb: addr=" );
-    up_putdec( modbus_cfg_get_addr() );
-    up_puts( " baud=" );
-    up_putdec( modbus_baud_table[ modbus_cfg_get_baud() ] );
-    up_puts( "\r\n" );
 
     usb_hid_init();
 
@@ -178,56 +165,6 @@ int main()
         modbus_rtu_poll();      /* 轮询 UART3: 收帧/解析/应答 Modbus 主站 */
         uart_debug_poll();      /* UART1 发送兜底: 缓冲非空且中断未开则重开 */
         modbus_diag_set_key_drop( ( UINT16 )usb_hid_ev_drop() );  /* 按键丢弃计数 → 0x0085 */
-
-/* 串口命令: 'p' 打印状态 'd' 打印丢弃计数 'e' 清空队列(其余字符忽略) */
-        if( R8_UART1_LSR & RB_LSR_DATA_RDY )
-        {
-            UINT8 c = R8_UART1_RBR;
-            if( c == 'p' )
-            {
-                up_puts( "st=" );
-                up_printf( "%x", usb_hid_dev_status() );
-                up_puts( " type=" );
-                up_printf( "%x", usb_hid_dev_type() );
-                up_puts( " ep0=" );
-                up_printf( "%x", usb_hid_ep0() );
-                up_puts( " ep1=" );
-                up_printf( "%x", usb_hid_ep1() );
-                up_puts( " attach=" );
-                up_printf( "%x", usb_hid_attach() );
-                up_puts( "\r\n" );
-            }
-            else if( c == 'd' )
-            {
-                up_puts( "drop=" );
-                up_putdec( usb_hid_ev_drop() );
-                up_puts( "\r\n" );
-            }
-            else if( c == 'e' )
-            {
-                usb_hid_ev_clear();
-                up_puts( "q clr\r\n" );
-            }
-        }
-
-/* 心跳: 每秒打印一次轮询统计(业务日志, 量产出货可裁剪) */
-        {
-            static UINT8 sec = 0;
-            if( ++sec >= 250 )
-            {
-                sec = 0;
-                dbg_puts( "H: poll=" );
-                dbg_putdec( usb_hid_diag_poll() );
-                dbg_puts( " ok=" );
-                dbg_putdec( usb_hid_diag_ok() );
-                dbg_puts( " nak=" );
-                dbg_putdec( usb_hid_diag_nak() );
-                dbg_puts( " err=" );
-                dbg_putdec( usb_hid_diag_err() );
-                dbg_puts( "\r\n" );
-                usb_hid_diag_reset();
-            }
-        }
 
         mDelaymS( 2 );
     }
