@@ -256,8 +256,18 @@ static void parse_consumer_report( UINT8 *buf, UINT8 len )
 {
     static UINT16 last_cu[ 4 ];
     static UINT8  last_n = 0;
+    static UINT16 last_tick = 0;
     UINT16 cur[ 4 ];
     UINT8  n = 0, i, j, found;
+
+    /* 同主键盘: 超时推断释放 */
+    if( ( UINT16 )( usb_poll_tick - last_tick ) > KBD_RELEASE_TIMEOUT_TICKS )
+    {
+        for( i = 0; i < last_n; i ++ )
+            kbd_ev_push( KEV_RELEASE, 0, 1, last_cu[ i ] );
+        last_n = 0;
+    }
+    last_tick = usb_poll_tick;
 
     if( len < 3 ) return;
     if( buf[ 0 ] != 0x01 ) return;      /* 仅解析 Consumer 报告(ReportID=1) */
