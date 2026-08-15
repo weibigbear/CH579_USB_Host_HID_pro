@@ -57,6 +57,11 @@ static UINT32  diag_ok   = 0;   /* 成功收到数据 */
 static UINT32  diag_nak  = 0;   /* 设备空闲 NAK */
 static UINT32  diag_err  = 0;   /* 其它错误 */
 
+static UINT16 usb_poll_tick = 0;                  /* 主循环轮数, 约2.4ms/轮 */
+
+/* 键盘不上报松开信号: 距上条报告超过该阈值即认为此前所有键已松开(≈50ms) */
+#define KBD_RELEASE_TIMEOUT_TICKS   20
+
 UINT32 usb_hid_diag_poll( void ) { return diag_poll; }
 UINT32 usb_hid_diag_ok( void )   { return diag_ok; }
 UINT32 usb_hid_diag_nak( void )  { return diag_nak; }
@@ -199,7 +204,19 @@ static void parse_kbd_report( UINT8 *buf, UINT8 len )
 {
     static UINT8 last_keys[ 6 ];
     static UINT8 last_mods = 0;
+    static UINT16 last_tick = 0;
     UINT8  i, j, mods, found;
+
+    /* 键盘不上报松开信号: 距上条报告超阈值即认为此前所有键已松开,
+       补发RELEASE并清空快照, 使同键重按被视为新按下 */
+    if( ( UINT16 )( usb_poll_tick - last_tick ) > KBD_RELEASE_TIMEOUT_TICKS )
+    {
+        for( i = 0; i < 6; i ++ )
+            if( last_keys[ i ] )
+                kbd_ev_push( KEV_RELEASE, last_mods, 0, last_keys[ i ] );
+        for( i = 0; i < 6; i ++ ) last_keys[ i ] = 0;
+    }
+    last_tick = usb_poll_tick;
 
     if( len < 3 ) return;
     mods = buf[ 0 ];
@@ -276,6 +293,7 @@ static void PollHIDEndpoints( void )
 {
     UINT8  i, ep, s, len;
 
+    usb_poll_tick ++;
     for( i = 0; i < 2; i ++ )
     {
         ep = ( i == 0 ) ? ThisUsbDev.GpVar[ 0 ] : ThisUsbDev.GpVar[ 1 ];
