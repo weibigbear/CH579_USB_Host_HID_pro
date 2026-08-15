@@ -105,15 +105,17 @@ static void process_key_events( void )
                 kdn ++;
                 if( kchr_used < 8 )                         /* 收集按下的字符(≤8) */
                 {
-                    char c = 0;
-                    if( ev.usage == 0x2C ) c = ' ';         /* Space 显示为空格 */
+                    const char *s;
+                    if( ev.usage == 0x2C ) s = " ";         /* Space 显示为空格 */
                     else
-                    {
-                        const char *s = key_display( ev.usage,
+                        s = key_display( ev.usage,
                             ( ( ev.mods >> 1 ) | ( ev.mods >> 5 ) ) & 1 );
-                        if( s[ 0 ] >= 0x20 ) c = s[ 0 ];    /* 多字符名(F1等)取首字符 */
+                    if( s[ 0 ] >= 0x20 )
+                    {
+                        while( s[ 0 ] && kchr_used < 8 )    /* 完整名(F1/Esc等) */
+                            kchr[ kchr_used ++ ] = *s ++;
+                        kchr[ kchr_used ] = 0;
                     }
-                    if( c ) { kchr[ kchr_used ++ ] = c; kchr[ kchr_used ] = 0; }
                 }
             }
             else kup ++;
